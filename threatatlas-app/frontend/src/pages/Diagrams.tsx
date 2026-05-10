@@ -32,6 +32,15 @@ import {
   AlertDialogTitle,
 } from '@/components/ui/alert-dialog';
 import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from '@/components/ui/dialog';
+import { Label } from '@/components/ui/label';
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -59,6 +68,8 @@ import {
   Maximize,
   Minimize,
   Sparkles,
+  Upload,
+  Home,
 } from 'lucide-react';
 import {
   Tooltip,
@@ -106,7 +117,10 @@ export function DiagramsContent() {
 
   const [nodes, setNodes, onNodesChange] = useNodesState<Node>([]);
   const [edges, setEdges, onEdgesChange] = useEdgesState<Edge>([]);
-  const { fitView } = useReactFlow();
+  const { fitView, getNodes } = useReactFlow();
+
+  // ── Boundary attach state ──────────────────────────────────────────────────
+  const [dragOverBoundaryId, setDragOverBoundaryId] = useState<string | null>(null);
 
   const handleExportJson = () => {
     const data = {
@@ -128,6 +142,43 @@ export function DiagramsContent() {
     URL.revokeObjectURL(url);
   };
 
+  // ── Create-diagram wizard state ────────────────────────────────────────────
+  const [showCreateWizard, setShowCreateWizard] = useState(false);
+  const [wizardStep, setWizardStep] = useState<'choose' | 'blank'>('choose');
+  const [newDiagramName, setNewDiagramName] = useState('');
+  const [creatingBlank, setCreatingBlank] = useState(false);
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  // Import choice (new diagram vs replace current)
+  const [showImportChoice, setShowImportChoice] = useState(false);
+  const [importMode, setImportMode] = useState<'new' | 'replace'>('new');
+
+  const openCreateWizard = () => {
+    setWizardStep('choose');
+    setNewDiagramName('');
+    setShowCreateWizard(true);
+  };
+
+  const handleCreateBlankDiagram = async () => {
+    if (!selectedProduct || !newDiagramName.trim()) return;
+    try {
+      setCreatingBlank(true);
+      const response = await diagramsApi.create({
+        product_id: selectedProduct,
+        name: newDiagramName.trim(),
+        diagram_data: { nodes: [], edges: [] },
+      });
+      setShowCreateWizard(false);
+      navigate(`/diagrams?product=${selectedProduct}&diagram=${response.data.id}`);
+      loadDiagrams(selectedProduct);
+      toast.success('Diagram created successfully.');
+    } catch {
+      toast.error('Failed to create diagram.');
+    } finally {
+      setCreatingBlank(false);
+    }
+  };
+  // ── End wizard state ───────────────────────────────────────────────────────
+
   const [sheetOpen, setSheetOpen] = useState(false);
   const [selectedElement, setSelectedElement] = useState<{ id: string; type: 'node' | 'edge'; label: string; nodeType?: string; description?: string } | null>(null);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -140,11 +191,13 @@ export function DiagramsContent() {
   // Threat/mitigation count badges per element_id
   const [elementCounts, setElementCounts] = useState<Record<string, { t: number; m: number }>>({});
 
-  const loadElementCounts = async (diagId: number) => {
+  const loadElementCounts = async (diagId: number, modelId?: number | null) => {
     try {
+      const params: Record<string, number> = { diagram_id: diagId };
+      if (modelId) params.model_id = modelId;
       const [threatsRes, mitsRes] = await Promise.all([
-        diagramThreatsApi.list({ diagram_id: diagId }),
-        diagramMitigationsApi.list({ diagram_id: diagId }),
+        diagramThreatsApi.list(params),
+        diagramMitigationsApi.list(params),
       ]);
       const counts: Record<string, { t: number; m: number }> = {};
       for (const dt of threatsRes.data) {
@@ -164,6 +217,15 @@ export function DiagramsContent() {
   // Model state
   const [activeModelId, setActiveModelId] = useState<number | null>(null);
   const [activeModel, setActiveModel] = useState<any>(null);
+
+  // Reload element counts whenever the selected model changes so badges
+  // reflect only threats/mitigations belonging to the active model.
+  useEffect(() => {
+    if (selectedDiagram) {
+      loadElementCounts(selectedDiagram, activeModelId);
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeModelId, selectedDiagram]);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -254,7 +316,7 @@ export function DiagramsContent() {
         setNodes(loadedNodes);
         setEdges(diagram.diagram_data.edges || []);
       }
-      loadElementCounts(diagId);
+      loadElementCounts(diagId, activeModelId);
     } catch (error) {
       console.error('Error loading diagram:', error);
       toast.error('Failed to load diagram.');
@@ -285,7 +347,7 @@ export function DiagramsContent() {
 
     try {
       setSaving(true);
-      const cleanNodes = nodes.map(({ data: { threatCount: _t, mitigationCount: _m, ...restData }, ...rest }) => ({
+      const cleanNodes = nodes.map(({ data: { threatCount: _t, mitigationCount: _m, isDropTarget: _d, ...restData }, ...rest }) => ({
         ...rest,
         data: restData,
       }));
@@ -314,6 +376,65 @@ export function DiagramsContent() {
     (params: Connection) => setEdges((eds) => addEdge({ ...params, animated: true, label: 'Data Flow' } as Edge, eds)),
     [setEdges]
   );
+
+  // ── Boundary grouping ──────────────────────────────────────────────────────
+  // Fixed rendered sizes for non-boundary nodes (used to compute center point)
+  const ATTACH_SIZE: Record<string, { w: number; h: number }> = {
+    process:   { w: 96,  h: 96  },
+    datastore: { w: 140, h: 40  },
+    external:  { w: 120, h: 44  },
+  };
+
+  const getBoundaryUnder = useCallback((node: Node): Node | undefined => {
+    const allNodes = getNodes();
+    // Absolute position: child positions are relative to parentId node
+    const parent = node.parentId ? allNodes.find(n => n.id === node.parentId) : undefined;
+    const absX = (parent ? parent.position.x : 0) + node.position.x;
+    const absY = (parent ? parent.position.y : 0) + node.position.y;
+    const size = ATTACH_SIZE[node.data.type as string] ?? { w: node.width ?? 80, h: node.height ?? 40 };
+    const cx = absX + size.w / 2;
+    const cy = absY + size.h / 2;
+    return allNodes.find(n => {
+      if (n.data.type !== 'boundary' || n.id === node.id) return false;
+      const bx = n.position.x; const by = n.position.y;
+      const bw = n.width ?? 300; const bh = n.height ?? 200;
+      return cx >= bx && cx <= bx + bw && cy >= by && cy <= by + bh;
+    });
+  }, [getNodes]);
+
+  const onNodeDrag = useCallback((_event: React.MouseEvent, node: Node) => {
+    if (node.data.type === 'boundary') { setDragOverBoundaryId(null); return; }
+    const boundary = getBoundaryUnder(node);
+    setDragOverBoundaryId(boundary?.id ?? null);
+  }, [getBoundaryUnder]);
+
+  const onNodeDragStop = useCallback((_event: React.MouseEvent, node: Node) => {
+    if (node.data.type === 'boundary') return;
+    setDragOverBoundaryId(null);
+
+    const allNodes = getNodes();
+    const parent = node.parentId ? allNodes.find(n => n.id === node.parentId) : undefined;
+    const absX = (parent ? parent.position.x : 0) + node.position.x;
+    const absY = (parent ? parent.position.y : 0) + node.position.y;
+    const containingBoundary = getBoundaryUnder(node);
+
+    if (containingBoundary) {
+      if (node.parentId === containingBoundary.id) return; // unchanged
+      const relPos = { x: absX - containingBoundary.position.x, y: absY - containingBoundary.position.y };
+      setNodes(nds => nds.map(n =>
+        n.id !== node.id ? n : { ...n, parentId: containingBoundary.id, position: relPos }
+      ));
+    } else if (node.parentId) {
+      // Dragged outside its boundary — detach
+      setNodes(nds => nds.map(n => {
+        if (n.id !== node.id) return n;
+        // eslint-disable-next-line @typescript-eslint/no-unused-vars
+        const { parentId: _p, extent: _e, ...rest } = n as any;
+        return { ...rest, position: { x: absX, y: absY } };
+      }));
+    }
+  }, [getNodes, getBoundaryUnder, setNodes]);
+  // ── End boundary grouping ──────────────────────────────────────────────────
 
   const addNode = (type: string) => {
     const newNode: Node = {
@@ -398,8 +519,13 @@ export function DiagramsContent() {
   };
 
   const handleImportSuccess = (diagramId: number) => {
-    loadDiagrams(selectedProduct!);
-    navigate(`/diagrams?product=${selectedProduct}&diagram=${diagramId}`);
+    if (importMode === 'replace') {
+      loadDiagram(diagramId);
+    } else {
+      loadDiagrams(selectedProduct!);
+      navigate(`/diagrams?product=${selectedProduct}&diagram=${diagramId}`);
+    }
+    setImportMode('new');
   };
 
   // Merge threat/mitigation counts into node data for rendering only (never saved)
@@ -410,9 +536,10 @@ export function DiagramsContent() {
         ...node.data,
         threatCount: elementCounts[node.id]?.t ?? 0,
         mitigationCount: elementCounts[node.id]?.m ?? 0,
+        isDropTarget: node.id === dragOverBoundaryId,
       },
     })),
-    [nodes, elementCounts]
+    [nodes, elementCounts, dragOverBoundaryId]
   );
 
   const selectedProductData = products.find(p => p.id === selectedProduct);
@@ -479,13 +606,10 @@ export function DiagramsContent() {
                 </SelectContent>
               </Select>
               {canWrite && (
-                <div className="flex items-center gap-2">
-                  <ImportDrawioButton productId={selectedProduct} onImportSuccess={handleImportSuccess} />
-                  <Button onClick={handleCreateDiagram}>
-                    <Plus className="mr-2 h-4 w-4" />
-                    New Diagram
-                  </Button>
-                </div>
+                <Button onClick={openCreateWizard}>
+                  <Plus className="mr-2 h-4 w-4" />
+                  New Diagram
+                </Button>
               )}
             </div>
           </div>
@@ -499,13 +623,10 @@ export function DiagramsContent() {
                   {canWrite ? 'Create your first diagram to start threat modeling' : 'No diagrams available for this product'}
                 </p>
                 {canWrite && (
-                  <div className="flex items-center gap-2">
-                    <ImportDrawioButton productId={selectedProduct} onImportSuccess={handleImportSuccess} />
-                    <Button onClick={handleCreateDiagram}>
-                      <Plus className="mr-2 h-4 w-4" />
-                      Create Diagram
-                    </Button>
-                  </div>
+                  <Button onClick={openCreateWizard}>
+                    <Plus className="mr-2 h-4 w-4" />
+                    Create Diagram
+                  </Button>
                 )}
               </CardContent>
             </Card>
@@ -545,56 +666,52 @@ export function DiagramsContent() {
 
   return (
     <div ref={containerRef} className={`h-full flex flex-col ${isFullscreen ? 'bg-background' : 'bg-muted/30'}`}>
-      {/* Redesigned Single-Row Header */}
-      <div className="h-14 border-b bg-background flex items-center justify-start px-3 z-20 shadow-sm relative sticky top-0 gap-2">
-        {/* Left Section: Navigation & breadcrumbs */}
-        <div className="flex items-center gap-1">
+      {/* ── Header ── */}
+      <div className="h-14 border-b bg-background flex items-center justify-between px-3 z-20 shadow-sm relative sticky top-0">
+        {/* Left: Breadcrumb */}
+        <div className="flex items-center gap-0.5 min-w-0">
           <TooltipProvider>
             <Tooltip>
               <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={() => navigate('/products')}
-                  className="h-10 w-10 hover:bg-muted"
-                >
-                  <Package className="h-4 w-4 text-primary" />
+                <Button variant="ghost" size="icon" onClick={() => navigate('/')} className="h-8 w-8 shrink-0 hover:bg-muted">
+                  <Home className="h-4 w-4 text-muted-foreground" />
                 </Button>
               </TooltipTrigger>
-              <TooltipContent>Back to Products</TooltipContent>
+              <TooltipContent>Home</TooltipContent>
             </Tooltip>
           </TooltipProvider>
 
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
 
-          <Select
-            value={selectedProduct?.toString() || ""}
-            onValueChange={(val) => navigate(`/diagrams?product=${val}`)}
+          <button
+            onClick={() => navigate('/products')}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors px-1.5 py-1 rounded-md hover:bg-muted shrink-0"
           >
-            <SelectTrigger className="h-10 px-2 border-none bg-muted/70 hover:bg-muted transition-all duration-300 w-[80px] hover:w-[180px] font-medium focus:ring-0 overflow-hidden">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              {products.map((product) => (
-                <SelectItem key={product.id} value={product.id.toString()}>
-                  {product.name}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
+            Products
+          </button>
 
-          <ChevronRight className="h-4 w-4 text-muted-foreground" />
+          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
+
+          <button
+            onClick={() => navigate(`/diagrams?product=${selectedProduct}`)}
+            className="text-sm text-muted-foreground hover:text-foreground transition-colors px-1.5 py-1 rounded-md hover:bg-muted max-w-[140px] truncate shrink-0"
+            title={selectedProductData?.name}
+          >
+            {selectedProductData?.name}
+          </button>
+
+          <ChevronRight className="h-3.5 w-3.5 text-muted-foreground/50 shrink-0" />
 
           <Input
             value={diagramName}
             onChange={(e) => setDiagramName(e.target.value)}
-            className="h-10 border-none bg-muted/70 hover:bg-muted focus-visible:bg-muted transition-all duration-300 w-[80px] hover:w-[220px] focus:w-[220px] font-bold text-sm focus-visible:ring-0 px-2"
+            className="h-8 border-none bg-transparent hover:bg-muted focus-visible:bg-muted transition-all duration-200 w-[90px] hover:w-[200px] focus:w-[200px] font-semibold text-sm focus-visible:ring-0 px-2 shrink-0"
             placeholder="Diagram name"
           />
         </div>
 
-        {/* Right Section: Analysis, Tools & Actions */}
-        <div className="flex items-center gap-1">
+        {/* Right: Model selector + toolbar + save */}
+        <div className="flex items-center gap-1.5 shrink-0">
           <div className="shrink-0">
             <ModelSelector
               diagramId={selectedDiagram}
@@ -612,175 +729,137 @@ export function DiagramsContent() {
             />
           </div>
 
-          <div className="h-8 w-px bg-border/40 mx-0.5 shrink-0" />
+          {canWrite && (
+            <TooltipProvider>
+              <div className="h-8 w-px bg-border/40 mx-0.5 shrink-0" />
 
-          <div className="flex items-center gap-1.5 shrink-0">
-            {canWrite && (
-              <TooltipProvider>
-                <div className="flex items-center bg-muted/30 border-none rounded-lg p-0.5">
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-primary hover:bg-primary/10"
-                        aria-label="New analysis model"
-                        onClick={() => setIsCreatingModel(true)}
-                      >
-                        <Plus className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>New Analysis Model</TooltipContent>
-                  </Tooltip>
+              <div className="flex items-center bg-muted/40 rounded-lg p-0.5 gap-0.5">
+                {/* Model actions */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-primary hover:bg-primary/10"
+                      onClick={() => setIsCreatingModel(true)}>
+                      <Plus className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>New Model</TooltipContent>
+                </Tooltip>
 
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                        aria-label="Edit model"
-                        onClick={() => setIsEditingModel(true)}
-                        disabled={!activeModelId}
-                      >
-                        <Pencil className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Edit Model</TooltipContent>
-                  </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                      onClick={() => setIsEditingModel(true)} disabled={!activeModelId}>
+                      <Pencil className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Edit Model</TooltipContent>
+                </Tooltip>
 
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8 text-destructive/60 hover:text-destructive hover:bg-destructive/10"
-                        aria-label="Delete model"
-                        onClick={() => setIsDeletingModel(true)}
-                        disabled={!activeModelId}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Delete Model</TooltipContent>
-                  </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-destructive/60 hover:text-destructive hover:bg-destructive/10"
+                      onClick={() => setIsDeletingModel(true)} disabled={!activeModelId}>
+                      <Trash2 className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Delete Model</TooltipContent>
+                </Tooltip>
 
-                  <div className="mx-0.5 h-4 w-px bg-border/60" />
+                <div className="h-4 w-px bg-border/60 mx-0.5" />
 
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant={showVersionComment ? "secondary" : "ghost"}
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label="Revision note"
-                        onClick={() => setShowVersionComment(!showVersionComment)}
-                      >
-                        <MessageSquare className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Revision Note</TooltipContent>
-                  </Tooltip>
+                {/* Diagram actions */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant={showVersionComment ? 'secondary' : 'ghost'} size="icon" className="h-8 w-8"
+                      onClick={() => setShowVersionComment(!showVersionComment)}>
+                      <MessageSquare className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Revision Note</TooltipContent>
+                </Tooltip>
 
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label="Download diagram as JSON"
-                        onClick={handleExportJson}
-                      >
-                        <Download className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Download (JSON)</TooltipContent>
-                  </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={handleExportJson}>
+                      <Download className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Download (JSON)</TooltipContent>
+                </Tooltip>
 
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label="Version history"
-                        onClick={() => setVersionHistoryOpen(true)}
-                      >
-                        <History className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>History</TooltipContent>
-                  </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => setVersionHistoryOpen(true)}>
+                      <History className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Version History</TooltipContent>
+                </Tooltip>
 
-                  <div className="mx-0.5 h-4 w-px bg-border/60" />
+                <div className="h-4 w-px bg-border/60 mx-0.5" />
 
-                  {/* AI Analysis */}
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant={aiChatOpen ? "secondary" : "ghost"}
-                        size="icon"
-                        className="h-8 w-8 text-primary hover:text-primary hover:bg-primary/10"
-                        aria-label="AI threat analysis"
-                        onClick={() => setAiChatOpen(!aiChatOpen)}
-                      >
-                        <Sparkles className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>AI Threat Analysis</TooltipContent>
-                  </Tooltip>
+                {/* AI + View */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant={aiChatOpen ? 'secondary' : 'ghost'} size="icon"
+                      className="h-8 w-8 text-primary hover:text-primary hover:bg-primary/10"
+                      onClick={() => setAiChatOpen(!aiChatOpen)}>
+                      <Sparkles className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>AI Threat Analysis</TooltipContent>
+                </Tooltip>
 
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label="Fit view"
-                        onClick={() => fitView({ duration: 800 })}
-                      >
-                        <Grid3x3 className="h-4 w-4" />
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>Fit View</TooltipContent>
-                  </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={() => fitView({ duration: 800 })}>
+                      <Grid3x3 className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Fit View</TooltipContent>
+                </Tooltip>
 
-                  <Tooltip>
-                    <TooltipTrigger asChild>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-8 w-8"
-                        aria-label={isFullscreen ? 'Exit full screen' : 'Full screen'}
-                        onClick={toggleFullscreen}
-                      >
-                        {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
-                      </Button>
-                    </TooltipTrigger>
-                    <TooltipContent>{isFullscreen ? 'Exit Full Screen' : 'Full Screen'}</TooltipContent>
-                  </Tooltip>
-                </div>
-              </TooltipProvider>
-            )}
+                {/* Import Draw.io — shows choice when diagram is open */}
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8"
+                      onClick={() => {
+                        if (selectedDiagram) {
+                          setShowImportChoice(true);
+                        } else {
+                          setImportMode('new');
+                          setImportDialogOpen(true);
+                        }
+                      }}>
+                      <Upload className="h-4 w-4" />
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>Import Draw.io</TooltipContent>
+                </Tooltip>
 
-            <div className="h-8 w-px bg-border/40 mx-1 shrink-0" />
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button variant="ghost" size="icon" className="h-8 w-8" onClick={toggleFullscreen}>
+                      {isFullscreen ? <Minimize className="h-4 w-4" /> : <Maximize className="h-4 w-4" />}
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>{isFullscreen ? 'Exit Full Screen' : 'Full Screen'}</TooltipContent>
+                </Tooltip>
+              </div>
 
-            {canWrite && selectedProduct && (
-              <ImportDrawioButton productId={selectedProduct} onImportSuccess={handleImportSuccess} />
-            )}
+              <div className="h-8 w-px bg-border/40 mx-0.5 shrink-0" />
 
-            {canWrite && (
               <Button
                 onClick={handleSaveDiagram}
                 disabled={saving}
                 size="sm"
-                className="h-9 px-3 shadow-sm font-bold bg-primary hover:bg-primary/90 transition-all active:scale-95"
+                className="h-9 px-4 font-semibold shadow-sm bg-primary hover:bg-primary/90 transition-all active:scale-95"
               >
                 <Save className="mr-1.5 h-4 w-4" />
-                {saving ? 'Saving...' : 'Save'}
+                {saving ? 'Saving…' : 'Save'}
               </Button>
-            )}
-          </div>
+            </TooltipProvider>
+          )}
         </div>
       </div>
 
@@ -817,6 +896,8 @@ export function DiagramsContent() {
           onConnect={onConnect}
           onNodeClick={handleNodeClick}
           onEdgeClick={handleEdgeClick}
+          onNodeDrag={onNodeDrag}
+          onNodeDragStop={onNodeDragStop}
           elevateNodesOnSelect={false}
           fitView
           className="bg-muted/20"
@@ -893,7 +974,7 @@ export function DiagramsContent() {
         open={sheetOpen}
         onOpenChange={(v) => {
           setSheetOpen(v);
-          if (!v && selectedDiagram) loadElementCounts(selectedDiagram);
+          if (!v && selectedDiagram) loadElementCounts(selectedDiagram, activeModelId);
         }}
         selectedElement={selectedElement}
         diagramId={selectedDiagram}
@@ -933,16 +1014,36 @@ export function DiagramsContent() {
         }}
         onChangeType={(newType) => {
           if (!selectedElement || selectedElement.type !== 'node') return;
+          // Fixed rendered sizes for non-boundary types (matches DiagramNode shapes).
+          const FIXED_SIZE: Record<string, { w: number; h: number }> = {
+            process:   { w: 96,  h: 96  },
+            datastore: { w: 140, h: 40  },
+            external:  { w: 120, h: 44  },
+          };
           setNodes((nds) =>
-            nds.map((node) =>
-              node.id === selectedElement.id
-                ? {
-                    ...node,
-                    zIndex: newType === 'boundary' ? -1 : (node.zIndex || 0),
-                    data: { ...node.data, type: newType },
-                  }
-                : node
-            )
+            nds.map((node) => {
+              if (node.id !== selectedElement.id) return node;
+              const oldType = node.data.type as string;
+              const fixed = FIXED_SIZE[newType];
+              // boundary → fixed-size: recompute position from centre of old boundary box
+              // so the element doesn't jump to a corner and handles land on the new shape.
+              let position = node.position;
+              if (oldType === 'boundary' && fixed && node.width && node.height) {
+                const cx = node.position.x + node.width / 2;
+                const cy = node.position.y + node.height / 2;
+                position = { x: cx - fixed.w / 2, y: cy - fixed.h / 2 };
+              }
+              return {
+                ...node,
+                position,
+                zIndex: newType === 'boundary' ? -1 : 10,
+                // Clear explicit dimensions for fixed-size types so ReactFlow
+                // measures the rendered element and positions handles correctly.
+                width:  newType === 'boundary' ? (node.width  ?? 300) : undefined,
+                height: newType === 'boundary' ? (node.height ?? 200) : undefined,
+                data: { ...node.data, type: newType },
+              };
+            })
           );
           setSelectedElement({ ...selectedElement, nodeType: newType });
         }}
@@ -1016,6 +1117,148 @@ export function DiagramsContent() {
         />
       )}
 
+      {/* ── Create Diagram Wizard ─────────────────────────────────────────── */}
+      <Dialog
+        open={showCreateWizard}
+        onOpenChange={(v) => { if (!v) { setShowCreateWizard(false); setWizardStep('choose'); } }}
+      >
+        <DialogContent className="sm:max-w-lg">
+          {wizardStep === 'choose' && (
+            <>
+              <DialogHeader>
+                <DialogTitle>New Diagram</DialogTitle>
+                <DialogDescription>
+                  Start with a blank canvas or import an existing Draw.io file.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="grid grid-cols-2 gap-3 py-2">
+                <button
+                  onClick={() => setWizardStep('blank')}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-6 text-left hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                    <Grid3x3 className="h-6 w-6 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Blank Canvas</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">Start from scratch</p>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => {
+                    setImportMode('new');
+                    setShowCreateWizard(false);
+                    setImportDialogOpen(true);
+                  }}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-6 text-left hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                    <Upload className="h-6 w-6 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Import Draw.io</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">.drawio or .xml file</p>
+                  </div>
+                </button>
+              </div>
+            </>
+          )}
+
+          {wizardStep === 'blank' && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Name your diagram</DialogTitle>
+                <DialogDescription>
+                  Give this diagram a name — you can always change it later.
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-2 py-2">
+                <Label htmlFor="new-diagram-name">Diagram name</Label>
+                <Input
+                  id="new-diagram-name"
+                  value={newDiagramName}
+                  onChange={(e) => setNewDiagramName(e.target.value)}
+                  placeholder="e.g. Payment Service DFD"
+                  autoFocus
+                  onKeyDown={(e) => e.key === 'Enter' && handleCreateBlankDiagram()}
+                />
+              </div>
+
+              <DialogFooter className="gap-2">
+                <button
+                  className="text-sm text-muted-foreground hover:text-foreground underline-offset-4 hover:underline mr-auto"
+                  onClick={() => setWizardStep('choose')}
+                >
+                  Back
+                </button>
+                <Button variant="outline" onClick={() => setShowCreateWizard(false)}>Cancel</Button>
+                <Button
+                  onClick={handleCreateBlankDiagram}
+                  disabled={!newDiagramName.trim() || creatingBlank}
+                >
+                  {creatingBlank ? 'Creating…' : 'Create Diagram'}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Import choice dialog — new diagram vs replace current */}
+      <Dialog open={showImportChoice} onOpenChange={setShowImportChoice}>
+        <DialogContent className="sm:max-w-sm">
+          <DialogHeader>
+            <DialogTitle>Import Draw.io</DialogTitle>
+            <DialogDescription>
+              How would you like to import the file?
+            </DialogDescription>
+          </DialogHeader>
+          <div className="grid grid-cols-2 gap-3 py-2">
+            <button
+              type="button"
+              onClick={() => { setImportMode('new'); setShowImportChoice(false); setImportDialogOpen(true); }}
+              className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-5 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            >
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10">
+                <Plus className="h-5 w-5 text-primary" />
+              </div>
+              <div>
+                <p className="font-semibold text-sm text-center">New Diagram</p>
+                <p className="text-xs text-muted-foreground text-center mt-0.5">Create a separate diagram</p>
+              </div>
+            </button>
+            <button
+              type="button"
+              onClick={() => { setImportMode('replace'); setShowImportChoice(false); setImportDialogOpen(true); }}
+              className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-5 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+            >
+              <div className="flex h-11 w-11 items-center justify-center rounded-full bg-orange-500/10">
+                <Upload className="h-5 w-5 text-orange-500" />
+              </div>
+              <div>
+                <p className="font-semibold text-sm text-center">Replace Current</p>
+                <p className="text-xs text-muted-foreground text-center mt-0.5">Overwrite this diagram</p>
+              </div>
+            </button>
+          </div>
+        </DialogContent>
+      </Dialog>
+
+      {/* Controlled ImportDrawioButton */}
+      {selectedProduct && (
+        <ImportDrawioButton
+          productId={selectedProduct}
+          onImportSuccess={handleImportSuccess}
+          open={importDialogOpen}
+          onOpenChange={setImportDialogOpen}
+          targetDiagramId={importMode === 'replace' && selectedDiagram ? selectedDiagram : undefined}
+          initialName={importMode === 'replace' ? diagramName : undefined}
+        />
+      )}
+
       {/* AI Chat Sheet */}
       <AIChatSheet
         open={aiChatOpen}
@@ -1027,6 +1270,9 @@ export function DiagramsContent() {
         onModelCreated={(modelId, model) => {
           setActiveModelId(modelId);
           setActiveModel(model);
+        }}
+        onProposalApproved={() => {
+          if (selectedDiagram) loadElementCounts(selectedDiagram, activeModelId);
         }}
       />
     </div>

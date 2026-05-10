@@ -6,11 +6,36 @@ immediately without any cache invalidation.
 """
 from __future__ import annotations
 
+import asyncio
 import uuid
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Annotated, Any
 
+from pydantic import BaseModel as _PydanticModel, BeforeValidator
 from sqlalchemy.orm import Session
+
+# pydantic-ai 1.x validates tool args strictly; models often send integers as
+# floats (e.g. 42.0).  This alias coerces any numeric value to a plain int.
+CoercedInt = Annotated[int, BeforeValidator(lambda v: int(v) if v is not None else v)]
+
+
+# ── Batch proposal item schemas (module-level so pydantic-ai can resolve them) ─
+
+class _ThreatBatchItem(_PydanticModel):
+    element_id: str
+    element_type: str
+    threat_id: CoercedInt
+    reasoning: str
+    model_proposal_id: str = ""
+
+
+class _MitigationBatchItem(_PydanticModel):
+    element_id: str
+    element_type: str
+    mitigation_id: CoercedInt
+    reasoning: str
+    for_threat_proposal_id: str = ""
+    model_proposal_id: str = ""
 
 from app.ai.encryption import decrypt_api_key
 from app.models.ai import AIConfig
@@ -22,6 +47,38 @@ You apply STRIDE, OWASP Top 10, LINDDUN, and any other framework loaded from the
 Respond naturally to greetings and general questions. Only run the analysis workflow when the user
 clearly requests a threat analysis, security review, or risk assessment. Ask one focused clarifying
 question if the intent is ambiguous (e.g. "Which framework should I use?" or "Focus on data flows or all elements?").
+
+## CRITICAL: Framework / model alignment — check this BEFORE every analysis:
+
+The active model_id and framework_id you receive at startup reflect whatever the user had selected in the UI
+at the time they sent the message — NOT necessarily the framework they are requesting in their message.
+
+Before starting any analysis:
+  a. Call `get_models_for_diagram` to see every model that exists for this diagram (with framework names).
+  b. Determine which framework(s) the user is asking for.
+  c. For EACH requested framework:
+     - If it IS the active model: proceed normally (no model_proposal_id needed).
+     - If it EXISTS but is NOT active: call `switch_model_context(model_id=<id>)` to switch to it,
+       then proceed. Tell the user: "Switching to the [Framework] model for this analysis."
+     - If NO model exists for the requested framework: call `propose_create_model` and note the
+       [model_proposal_id=...] value in its response — you MUST pass this as `model_proposal_id`
+       to every propose_threat / propose_mitigation call that belongs to this framework.
+  d. NEVER save threats or mitigations to a model whose framework does not match the requested analysis.
+     This is the most important rule — framework mismatch corrupts the threat model.
+
+## CRITICAL: Multi-framework ordering rule — read before doing any multi-framework analysis:
+
+When the user requests two or more frameworks (e.g. "do STRIDE and OWASP"), you MUST follow this
+exact interleaved sequence — NEVER create all models first:
+
+  1. call propose_create_model for framework A → capture [model_proposal_id=AAA]
+  2. propose ALL threats + mitigations for framework A, each with model_proposal_id="AAA"
+  3. call propose_create_model for framework B → capture [model_proposal_id=BBB]
+  4. propose ALL threats + mitigations for framework B, each with model_proposal_id="BBB"
+
+Creating all models upfront then proposing threats loses the per-model link. The explicit
+model_proposal_id parameter on each propose_threat / propose_mitigation call is what binds
+proposals to the correct model at approval time.
 
 ## Analysis workflow — run for every security analysis request:
 
@@ -38,20 +95,19 @@ STEP 1  Call `get_diagram_context`. Note: element types, labels, trust-boundary 
 STEP 2  Call `get_knowledge_base_threats`.
 STEP 3  Call `get_knowledge_base_mitigations`.
 
-STEP 4  Analyse every non-boundary element and every data flow edge. For each:
-        a. Consider the element type:
-           - process: authentication bypass, injection, privilege escalation, insecure logic, logging gaps
-           - datastore: access control, encryption at rest, injection, data leakage, integrity
-           - external entity: spoofing, untrusted input, data harvesting, session abuse
-           - data flow edge: interception (TLS), tampering, replay, injection, flooding
-             (flag extra scrutiny when crosses_trust_boundary=true)
-        b. Map applicable KB threats. Propose the top 5 most relevant.
-           Call `propose_threat` with element_id, element_type, threat_id, reasoning (1 sentence).
-           Do NOT include likelihood/impact/risk scoring — that is a separate user request.
+STEP 4  Analyse every non-boundary element and every data flow edge.
+        a. Determine the top 3 most relevant KB threats per element (consider element type,
+           data sensitivity, and trust-boundary crossings).
+        b. Call `propose_threats_batch` ONCE with ALL threat proposals across ALL elements
+           (pass the full list in one call). Do NOT call propose_threat in a loop — batching
+           is required for performance.
+           - reasoning: 1 sentence max per item, specific to the element.
+           - Do NOT include likelihood/impact — that is a separate user request.
         c. Call `propose_custom_threat` ONLY for important threats genuinely absent from the KB.
 
-STEP 5  For each proposed threat, call `propose_mitigation` for the top 2-3 most relevant KB mitigations.
-        Set `for_threat_proposal_id` to link them. Add `propose_custom_mitigation` only if needed.
+STEP 5  After step 4, call `propose_mitigations_batch` ONCE with ALL mitigation proposals across
+        ALL elements. Use for_threat_proposal_id to link mitigations to the threat proposals from step 4.
+        Top 2 mitigations per threat maximum. Add `propose_custom_mitigation` only if truly needed.
 
 STEP 6  Write a focused summary: elements covered, total threats and mitigations proposed, key findings.
 
@@ -85,6 +141,13 @@ class AgentDeps:
     model_id: int | None
     framework_id: int | None
     proposals: list[dict[str, Any]] = field(default_factory=list)
+    events_queue: asyncio.Queue | None = field(default=None)
+    # Tracks the ID of the most recent propose_create_model proposal so that
+    # subsequent threat/mitigation proposals can be explicitly linked to it.
+    # The approval handler uses this to patch model_id onto linked proposals
+    # when the create_model proposal is approved — enabling correct multi-framework
+    # linking even when multiple frameworks are proposed in one response.
+    pending_model_proposal_id: str | None = field(default=None)
 
 
 def _make_openai_model(OpenAIModel, model_name: str, api_key: str, base_url: str | None = None):
@@ -171,13 +234,19 @@ def build_agent(config: AIConfig):
         model,
         deps_type=AgentDeps,
         system_prompt=SYSTEM_PROMPT,
+        retries=3,  # pydantic-ai 1.x: allow 3 retries on tool argument validation failures
     )
 
     # ── Tools ──────────────────────────────────────────────────────────────
 
+    async def _emit(ctx, message: str) -> None:
+        if ctx.deps.events_queue is not None:
+            await ctx.deps.events_queue.put({"thinking": message})
+
     @agent.tool
     async def get_diagram_context(ctx) -> dict[str, Any]:
         """Get all elements and data flows in the current diagram."""
+        await _emit(ctx, "Reading diagram structure…")
         from app.models import Diagram as DiagramModel
         diagram = ctx.deps.db.query(DiagramModel).filter(
             DiagramModel.id == ctx.deps.diagram_id
@@ -229,6 +298,7 @@ def build_agent(config: AIConfig):
     async def get_existing_diagram_analysis(ctx) -> dict[str, Any]:
         """Return all threats and mitigations ALREADY attached to this diagram's elements.
         Call this FIRST so you do not re-propose anything that already exists."""
+        await _emit(ctx, "Checking existing analysis…")
         from app.models import DiagramThreat, DiagramMitigation, Threat, Mitigation
 
         existing_threats = ctx.deps.db.query(DiagramThreat).filter(
@@ -313,6 +383,7 @@ def build_agent(config: AIConfig):
     async def get_knowledge_base_threats(ctx) -> list[dict[str, Any]]:
         """Load all threats from the knowledge base for the active framework.
         Call this once before proposing any threats."""
+        await _emit(ctx, "Loading threat knowledge base…")
         from app.models import Threat
         from app.services.redis_cache import cache
 
@@ -336,6 +407,7 @@ def build_agent(config: AIConfig):
     async def get_knowledge_base_mitigations(ctx) -> list[dict[str, Any]]:
         """Load all mitigations from the knowledge base for the active framework.
         Call this once before proposing any mitigations."""
+        await _emit(ctx, "Loading mitigation knowledge base…")
         from app.models import Mitigation
         from app.services.redis_cache import cache
 
@@ -379,17 +451,20 @@ def build_agent(config: AIConfig):
                     return f"{node_map.get(src, src)} → {node_map.get(tgt, tgt)}"
         return element_id
 
-    @agent.tool
+    @agent.tool(retries=3)
     async def propose_threat(
         ctx,
         element_id: str,
         element_type: str,
         threat_id: int,
         reasoning: str,
+        model_proposal_id: str = "",
         likelihood: int | None = None,
         impact: int | None = None,
     ) -> str:
         """Register a threat proposal for the user to review and approve.
+        Set model_proposal_id to the [model_proposal_id=...] value returned by propose_create_model
+        when this threat belongs to a model that is pending creation (multi-framework analysis).
         Do NOT set likelihood/impact during regular threat analysis — only set them when the
         user explicitly requests risk scoring."""
         # ── Hard deduplication ──────────────────────────────────────────────
@@ -419,6 +494,7 @@ def build_agent(config: AIConfig):
                for p in ctx.deps.proposals):
             return f"Skipped — threat #{threat_id} already proposed in this response"
 
+        await _emit(ctx, f"Proposing threat #{threat_id} on {element_type} '{element_id}'…")
         risk_score = (likelihood * impact) if (likelihood and impact) else None
         severity: str | None = None
         if risk_score is not None:
@@ -440,6 +516,7 @@ def build_agent(config: AIConfig):
             "description": threat.description if threat else "",
             "category": threat.category if threat else None,
             "model_id": ctx.deps.model_id,
+            "pending_model_proposal_id": model_proposal_id or ctx.deps.pending_model_proposal_id,
             "reasoning": reasoning,
             "likelihood": likelihood,
             "impact": impact,
@@ -449,7 +526,7 @@ def build_agent(config: AIConfig):
         })
         return f"Threat proposal '{threat.name if threat else threat_id}' registered as {proposal_id}"
 
-    @agent.tool
+    @agent.tool(retries=3)
     async def propose_mitigation(
         ctx,
         element_id: str,
@@ -457,9 +534,12 @@ def build_agent(config: AIConfig):
         mitigation_id: int,
         reasoning: str,
         for_threat_proposal_id: str = "",
+        model_proposal_id: str = "",
     ) -> str:
         """Register a mitigation proposal. Set for_threat_proposal_id to the ID of the
-        threat proposal this mitigation addresses (from the return value of propose_threat)."""
+        threat proposal this mitigation addresses (from the return value of propose_threat).
+        Set model_proposal_id to the [model_proposal_id=...] value from propose_create_model
+        when this mitigation belongs to a model that is pending creation (multi-framework analysis)."""
         # ── Hard deduplication ──────────────────────────────────────────────
         from app.models import DiagramMitigation, Mitigation
         already_in_diagram = ctx.deps.db.query(DiagramMitigation).filter(
@@ -485,6 +565,7 @@ def build_agent(config: AIConfig):
                for p in ctx.deps.proposals):
             return f"Skipped — mitigation #{mitigation_id} already proposed in this response"
 
+        await _emit(ctx, f"Proposing mitigation #{mitigation_id} on '{element_id}'…")
         proposal_id = f"prop_m_{uuid.uuid4().hex[:8]}"
         from app.models import Mitigation
         mit = ctx.deps.db.query(Mitigation).filter(Mitigation.id == mitigation_id).first()
@@ -509,6 +590,7 @@ def build_agent(config: AIConfig):
             "description": mit.description if mit else "",
             "category": mit.category if mit else None,
             "model_id": ctx.deps.model_id,
+            "pending_model_proposal_id": model_proposal_id or ctx.deps.pending_model_proposal_id,
             "reasoning": reasoning,
             "for_threat_proposal_id": for_threat_proposal_id or None,
             "linked_threat_kb_id": linked_threat_kb_id,
@@ -520,6 +602,7 @@ def build_agent(config: AIConfig):
     async def get_available_frameworks(ctx) -> list[dict[str, Any]]:
         """List all available threat modeling frameworks (e.g. STRIDE, OWASP, LINDDUN).
         Call this when model_id is None to choose a framework before proposing model creation."""
+        await _emit(ctx, "Loading available frameworks…")
         from app.models import Framework
         frameworks = ctx.deps.db.query(Framework).all()
         return [
@@ -527,7 +610,7 @@ def build_agent(config: AIConfig):
             for f in frameworks
         ]
 
-    @agent.tool
+    @agent.tool(retries=3)
     async def propose_create_model(
         ctx,
         framework_id: int,
@@ -537,6 +620,7 @@ def build_agent(config: AIConfig):
         """Propose creating a threat model container for this diagram with the given framework.
         Only call this when model_id is None. Threats and mitigations proposed afterward will be
         linked to this model once the user approves it."""
+        await _emit(ctx, f"Creating threat model '{model_name}'…")
         from app.models import Framework
         from app.models.model import Model as ModelTable
 
@@ -574,12 +658,19 @@ def build_agent(config: AIConfig):
             "reasoning": reasoning,
             "status": "pending",
         })
+        # Clear model_id so subsequent proposals carry model_id=None.
+        # Record the proposal_id so threats/mitigations can be implicitly linked.
+        ctx.deps.model_id = None
+        ctx.deps.framework_id = framework_id
+        ctx.deps.pending_model_proposal_id = proposal_id
         return (
-            f"Model creation proposal '{model_name}' ({framework.name}) registered as {proposal_id}. "
-            "Continuing with analysis — threats and mitigations will be linked to this model upon approval."
+            f"[model_proposal_id={proposal_id}] "
+            f"Model creation proposal '{model_name}' ({framework.name}) queued for approval. "
+            f"You MUST pass model_proposal_id=\"{proposal_id}\" to every propose_threat and "
+            f"propose_mitigation call that belongs to this {framework.name} analysis."
         )
 
-    @agent.tool
+    @agent.tool(retries=3)
     async def propose_custom_threat(
         ctx,
         element_id: str,
@@ -588,12 +679,14 @@ def build_agent(config: AIConfig):
         description: str,
         category: str,
         reasoning: str,
+        model_proposal_id: str = "",
         likelihood: int | None = None,
         impact: int | None = None,
     ) -> str:
         """Suggest a NEW threat that is not in the knowledge base.
         Use this ONLY when you have identified a relevant, specific threat that the KB lacks.
         The user will be asked to approve both adding it to the KB and applying it to the diagram.
+        Set model_proposal_id when this custom threat belongs to a pending model creation (multi-framework).
         Do NOT set likelihood/impact unless the user has explicitly requested risk scoring."""
         # Avoid proposing if the same custom threat name already exists in the session
         if any(
@@ -604,6 +697,7 @@ def build_agent(config: AIConfig):
         ):
             return f"Skipped — custom threat '{name}' already proposed for {element_id}"
 
+        await _emit(ctx, f"Proposing new threat: {name}…")
         risk_score = (likelihood * impact) if (likelihood and impact) else None
         severity: str | None = None
         if risk_score is not None:
@@ -625,6 +719,7 @@ def build_agent(config: AIConfig):
             "category": category,
             "framework_id": ctx.deps.framework_id,
             "model_id": ctx.deps.model_id,
+            "pending_model_proposal_id": model_proposal_id or ctx.deps.pending_model_proposal_id,
             "reasoning": reasoning,
             "likelihood": likelihood,
             "impact": impact,
@@ -634,7 +729,7 @@ def build_agent(config: AIConfig):
         })
         return f"Custom threat suggestion '{name}' registered as {proposal_id} (will add to KB on approval)"
 
-    @agent.tool
+    @agent.tool(retries=3)
     async def propose_custom_mitigation(
         ctx,
         element_id: str,
@@ -644,10 +739,12 @@ def build_agent(config: AIConfig):
         category: str,
         reasoning: str,
         for_threat_proposal_id: str = "",
+        model_proposal_id: str = "",
     ) -> str:
         """Suggest a NEW mitigation that is not in the knowledge base.
         Use this ONLY when you have identified a relevant mitigation the KB lacks.
-        The user will be asked to approve both adding it to the KB and applying it to the diagram."""
+        The user will be asked to approve both adding it to the KB and applying it to the diagram.
+        Set model_proposal_id when this custom mitigation belongs to a pending model creation (multi-framework)."""
         if any(
             p.get("type") == "suggest_kb_mitigation" and
             p.get("element_id") == element_id and
@@ -656,6 +753,7 @@ def build_agent(config: AIConfig):
         ):
             return f"Skipped — custom mitigation '{name}' already proposed for {element_id}"
 
+        await _emit(ctx, f"Proposing new mitigation: {name}…")
         # Resolve linked threat KB ID from in-memory proposals
         linked_threat_kb_id: int | None = None
         if for_threat_proposal_id:
@@ -676,6 +774,7 @@ def build_agent(config: AIConfig):
             "category": category,
             "framework_id": ctx.deps.framework_id,
             "model_id": ctx.deps.model_id,
+            "pending_model_proposal_id": model_proposal_id or ctx.deps.pending_model_proposal_id,
             "reasoning": reasoning,
             "for_threat_proposal_id": for_threat_proposal_id or None,
             "linked_threat_kb_id": linked_threat_kb_id,
@@ -683,7 +782,7 @@ def build_agent(config: AIConfig):
         })
         return f"Custom mitigation suggestion '{name}' registered as {proposal_id} (will add to KB on approval)"
 
-    @agent.tool
+    @agent.tool(retries=3)
     async def propose_risk_update(
         ctx,
         diagram_threat_id: int,
@@ -712,6 +811,7 @@ def build_agent(config: AIConfig):
         ):
             return f"Skipped — risk update for threat #{diagram_threat_id} already proposed"
 
+        await _emit(ctx, f"Scoring risk for '{threat_name}'…")
         likelihood = max(1, min(5, likelihood))
         impact = max(1, min(5, impact))
         risk_score = likelihood * impact
@@ -744,7 +844,7 @@ def build_agent(config: AIConfig):
         })
         return f"Risk update proposal for '{threat_name}' registered as {proposal_id} (L={likelihood}, I={impact}, score={risk_score}, {severity})"
 
-    @agent.tool
+    @agent.tool(retries=3)
     async def propose_removal(
         ctx,
         item_type: str,
@@ -767,6 +867,7 @@ def build_agent(config: AIConfig):
         ):
             return f"Skipped — removal of {item_type} #{diagram_item_id} already proposed"
 
+        await _emit(ctx, f"Proposing removal of {item_type} '{name}'…")
         proposal_id = f"prop_rem_{uuid.uuid4().hex[:8]}"
         ctx.deps.proposals.append({
             "id": proposal_id,
@@ -781,5 +882,200 @@ def build_agent(config: AIConfig):
             "status": "pending",
         })
         return f"Removal proposal for {item_type} '{name}' registered as {proposal_id}"
+
+    @agent.tool(retries=3)
+    async def propose_threats_batch(ctx, items: list[_ThreatBatchItem]) -> str:
+        """Propose multiple threats in ONE call — mandatory for efficiency.
+        Use this instead of calling propose_threat in a loop.
+        Pass ALL threat proposals for the entire diagram at once."""
+        from app.models import DiagramThreat, Threat
+        from app.models.ai import AIMessage
+
+        threat_ids = {item.threat_id for item in items}
+        threat_map = {
+            t.id: t for t in ctx.deps.db.query(Threat).filter(Threat.id.in_(threat_ids)).all()
+        } if threat_ids else {}
+
+        # Pre-load existing threats for deduplication
+        existing_pairs: set[tuple] = set()
+        for dt in ctx.deps.db.query(DiagramThreat).filter(
+            DiagramThreat.diagram_id == ctx.deps.diagram_id
+        ).all():
+            existing_pairs.add((dt.element_id, dt.threat_id))
+
+        # Previous-conversation proposals
+        for msg in ctx.deps.db.query(AIMessage).filter(
+            AIMessage.conversation_id == ctx.deps.conversation_id
+        ).all():
+            for p in (msg.proposals or []):
+                if p.get("type") == "threat" and p.get("status") in ("pending", "approved"):
+                    existing_pairs.add((p.get("element_id"), p.get("threat_id")))
+
+        registered: list[str] = []
+        skipped = 0
+
+        for item in items:
+            if (item.element_id, item.threat_id) in existing_pairs:
+                skipped += 1
+                continue
+            if any(
+                p["type"] == "threat" and p["element_id"] == item.element_id and p["threat_id"] == item.threat_id
+                for p in ctx.deps.proposals
+            ):
+                skipped += 1
+                continue
+
+            threat = threat_map.get(item.threat_id)
+            proposal_id = f"prop_t_{uuid.uuid4().hex[:8]}"
+            ctx.deps.proposals.append({
+                "id": proposal_id,
+                "type": "threat",
+                "element_id": item.element_id,
+                "element_type": item.element_type,
+                "element_label": _get_element_label(ctx, item.element_id),
+                "threat_id": item.threat_id,
+                "name": threat.name if threat else f"Threat #{item.threat_id}",
+                "description": threat.description if threat else "",
+                "category": threat.category if threat else None,
+                "model_id": ctx.deps.model_id,
+                "pending_model_proposal_id": item.model_proposal_id or ctx.deps.pending_model_proposal_id,
+                "reasoning": item.reasoning,
+                "likelihood": None,
+                "impact": None,
+                "risk_score": None,
+                "severity": None,
+                "status": "pending",
+            })
+            registered.append(proposal_id)
+            existing_pairs.add((item.element_id, item.threat_id))
+
+        await _emit(ctx, f"Registered {len(registered)} threat proposals ({skipped} skipped as duplicates)…")
+        return f"Registered {len(registered)} threats, skipped {skipped} duplicates. IDs: {', '.join(registered)}"
+
+    @agent.tool(retries=3)
+    async def propose_mitigations_batch(ctx, items: list[_MitigationBatchItem]) -> str:
+        """Propose multiple mitigations in ONE call — mandatory for efficiency.
+        Use this instead of calling propose_mitigation in a loop.
+        Pass ALL mitigation proposals for the entire diagram at once."""
+        from app.models import DiagramMitigation, Mitigation
+        from app.models.ai import AIMessage
+
+        mit_ids = {item.mitigation_id for item in items}
+        mit_map = {
+            m.id: m for m in ctx.deps.db.query(Mitigation).filter(Mitigation.id.in_(mit_ids)).all()
+        } if mit_ids else {}
+
+        # Pre-load existing mitigations for deduplication
+        existing_pairs: set[tuple] = set()
+        for dm in ctx.deps.db.query(DiagramMitigation).filter(
+            DiagramMitigation.diagram_id == ctx.deps.diagram_id
+        ).all():
+            existing_pairs.add((dm.element_id, dm.mitigation_id))
+
+        for msg in ctx.deps.db.query(AIMessage).filter(
+            AIMessage.conversation_id == ctx.deps.conversation_id
+        ).all():
+            for p in (msg.proposals or []):
+                if p.get("type") == "mitigation" and p.get("status") in ("pending", "approved"):
+                    existing_pairs.add((p.get("element_id"), p.get("mitigation_id")))
+
+        registered: list[str] = []
+        skipped = 0
+
+        for item in items:
+            if (item.element_id, item.mitigation_id) in existing_pairs:
+                skipped += 1
+                continue
+            if any(
+                p["type"] == "mitigation" and p["element_id"] == item.element_id and p["mitigation_id"] == item.mitigation_id
+                for p in ctx.deps.proposals
+            ):
+                skipped += 1
+                continue
+
+            # Resolve linked threat KB id from in-memory proposals
+            linked_threat_kb_id: int | None = None
+            if item.for_threat_proposal_id:
+                for p in ctx.deps.proposals:
+                    if p.get("id") == item.for_threat_proposal_id and p.get("type") == "threat":
+                        linked_threat_kb_id = p.get("threat_id")
+                        break
+
+            mit = mit_map.get(item.mitigation_id)
+            proposal_id = f"prop_m_{uuid.uuid4().hex[:8]}"
+            ctx.deps.proposals.append({
+                "id": proposal_id,
+                "type": "mitigation",
+                "element_id": item.element_id,
+                "element_type": item.element_type,
+                "element_label": _get_element_label(ctx, item.element_id),
+                "mitigation_id": item.mitigation_id,
+                "name": mit.name if mit else f"Mitigation #{item.mitigation_id}",
+                "description": mit.description if mit else "",
+                "category": mit.category if mit else None,
+                "model_id": ctx.deps.model_id,
+                "pending_model_proposal_id": item.model_proposal_id or ctx.deps.pending_model_proposal_id,
+                "reasoning": "",
+                "for_threat_proposal_id": item.for_threat_proposal_id or None,
+                "linked_threat_kb_id": linked_threat_kb_id,
+                "status": "pending",
+            })
+            registered.append(proposal_id)
+            existing_pairs.add((item.element_id, item.mitigation_id))
+
+        await _emit(ctx, f"Registered {len(registered)} mitigation proposals ({skipped} skipped as duplicates)…")
+        return f"Registered {len(registered)} mitigations, skipped {skipped} duplicates. IDs: {', '.join(registered)}"
+
+    @agent.tool
+    async def get_models_for_diagram(ctx) -> list[dict[str, Any]]:
+        """Get all threat models for this diagram with their framework names.
+        Call this BEFORE any analysis to verify you are saving to the correct model."""
+        await _emit(ctx, "Checking available threat models for this diagram…")
+        from app.models.model import Model as ModelTable
+        from app.models import Framework
+
+        models = ctx.deps.db.query(ModelTable).filter(
+            ModelTable.diagram_id == ctx.deps.diagram_id
+        ).all()
+
+        result = []
+        for m in models:
+            fw = ctx.deps.db.query(Framework).filter(Framework.id == m.framework_id).first()
+            result.append({
+                "model_id": m.id,
+                "model_name": m.name,
+                "framework_id": m.framework_id,
+                "framework_name": fw.name if fw else "Unknown",
+                "is_active": m.id == ctx.deps.model_id,
+            })
+        return result
+
+    @agent.tool
+    async def switch_model_context(ctx, model_id: CoercedInt) -> dict[str, Any]:
+        """Switch the active model context so subsequent proposals target a different model.
+        Call this when the requested framework does not match the currently active model.
+        Returns the new active model details or an error if the model is not found."""
+        from app.models.model import Model as ModelTable
+
+        model = ctx.deps.db.query(ModelTable).filter(
+            ModelTable.id == model_id,
+            ModelTable.diagram_id == ctx.deps.diagram_id,
+        ).first()
+        if not model:
+            return {"error": f"Model {model_id} not found for this diagram"}
+
+        ctx.deps.model_id = model_id
+        ctx.deps.framework_id = model.framework_id
+        ctx.deps.pending_model_proposal_id = None  # existing model — no pending create
+
+        from app.models import Framework
+        fw = ctx.deps.db.query(Framework).filter(Framework.id == model.framework_id).first()
+        await _emit(ctx, f"Switched to model '{model.name}' ({fw.name if fw else 'Unknown framework'})…")
+        return {
+            "switched_to_model_id": model_id,
+            "framework_id": model.framework_id,
+            "framework_name": fw.name if fw else "Unknown",
+            "model_name": model.name,
+        }
 
     return agent

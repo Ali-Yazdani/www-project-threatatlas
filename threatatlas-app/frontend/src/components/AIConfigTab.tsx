@@ -36,19 +36,52 @@ const PROVIDER_MODELS: Record<string, { id: string; label: string }[]> = {
   openai_compatible: [],
 };
 
-// Cost in USD per 1M tokens
-const TOKEN_PRICING: Record<string, { input: number; output: number; label: string }> = {
-  'gpt-5.4':           { input: 2.50,  output: 10.00, label: 'GPT-5.4' },
-  'gpt-5.4-mini':      { input: 0.15,  output: 0.60,  label: 'GPT-5.4 Mini' },
-  'gpt-5.4-nano':      { input: 0.10,  output: 0.40,  label: 'GPT-5.4 Nano' },
-  'gpt-4o':            { input: 2.50,  output: 10.00, label: 'GPT-4o' },
-  'gpt-4o-mini':       { input: 0.15,  output: 0.60,  label: 'GPT-4o Mini' },
-  'gpt-4.1':           { input: 2.00,  output: 8.00,  label: 'GPT-4.1' },
-  'gpt-4.1-mini':      { input: 0.40,  output: 1.60,  label: 'GPT-4.1 Mini' },
-  'claude-opus-4-7':   { input: 15.00, output: 75.00, label: 'Claude Opus 4.7' },
-  'claude-sonnet-4-6': { input: 3.00,  output: 15.00, label: 'Claude Sonnet 4.6' },
-  'claude-haiku-4-5':  { input: 0.80,  output: 4.00,  label: 'Claude Haiku 4.5' },
-};
+// Cost in USD per 1M tokens — prefix-matched (longest prefix wins, so list specific before general)
+const TOKEN_PRICING: Array<{ prefix: string; input: number; output: number; label: string }> = [
+  // ── OpenAI ──────────────────────────────────────────────────────────────────
+  { prefix: 'gpt-5.5-pro',    input: 30.00, output: 180.00, label: 'GPT-5.5 Pro' },
+  { prefix: 'gpt-5.5',        input: 5.00,  output: 30.00,  label: 'GPT-5.5' },
+  { prefix: 'gpt-5.4-pro',    input: 30.00, output: 180.00, label: 'GPT-5.4 Pro' },
+  { prefix: 'gpt-5.4-nano',   input: 0.20,  output: 1.25,   label: 'GPT-5.4 Nano' },
+  { prefix: 'gpt-5.4-mini',   input: 0.75,  output: 4.50,   label: 'GPT-5.4 Mini' },
+  { prefix: 'gpt-5.4',        input: 2.50,  output: 15.00,  label: 'GPT-5.4' },
+  { prefix: 'gpt-4.1-nano',   input: 0.10,  output: 0.40,   label: 'GPT-4.1 Nano' },
+  { prefix: 'gpt-4.1-mini',   input: 0.40,  output: 1.60,   label: 'GPT-4.1 Mini' },
+  { prefix: 'gpt-4.1',        input: 2.00,  output: 8.00,   label: 'GPT-4.1' },
+  { prefix: 'gpt-4o-mini',    input: 0.15,  output: 0.60,   label: 'GPT-4o Mini' },
+  { prefix: 'gpt-4o',         input: 2.50,  output: 10.00,  label: 'GPT-4o' },
+  { prefix: 'o4-mini',        input: 1.10,  output: 4.40,   label: 'o4 Mini' },
+  { prefix: 'o3-mini',        input: 1.10,  output: 4.40,   label: 'o3 Mini' },
+  { prefix: 'o3',             input: 10.00, output: 40.00,  label: 'o3' },
+  { prefix: 'o1-mini',        input: 1.10,  output: 4.40,   label: 'o1 Mini' },
+  { prefix: 'o1',             input: 15.00, output: 60.00,  label: 'o1' },
+  // ── Anthropic ───────────────────────────────────────────────────────────────
+  { prefix: 'claude-opus-4-7',   input: 5.00,  output: 25.00, label: 'Claude Opus 4.7' },
+  { prefix: 'claude-sonnet-4-6', input: 3.00,  output: 15.00, label: 'Claude Sonnet 4.6' },
+  { prefix: 'claude-haiku-4-5',  input: 1.00,  output: 5.00,  label: 'Claude Haiku 4.5' },
+  // ── OpenAI-compatible (third-party / self-hosted) ───────────────────────────
+  { prefix: 'deepseek-r1',          input: 0.55,  output: 2.19,  label: 'DeepSeek R1' },
+  { prefix: 'deepseek-v3',          input: 0.27,  output: 1.10,  label: 'DeepSeek V3' },
+  { prefix: 'deepseek-chat',        input: 0.14,  output: 0.28,  label: 'DeepSeek Chat' },
+  { prefix: 'meta-llama/llama-3',   input: 0.18,  output: 0.18,  label: 'Llama 3' },
+  { prefix: 'llama3',               input: 0.00,  output: 0.00,  label: 'Llama 3 (local)' },
+  { prefix: 'llama-3',              input: 0.00,  output: 0.00,  label: 'Llama 3 (local)' },
+  { prefix: 'mistral-large',        input: 2.00,  output: 6.00,  label: 'Mistral Large' },
+  { prefix: 'mistral-small',        input: 0.10,  output: 0.30,  label: 'Mistral Small' },
+  { prefix: 'mixtral',              input: 0.24,  output: 0.24,  label: 'Mixtral' },
+  { prefix: 'mistral',              input: 0.25,  output: 0.25,  label: 'Mistral' },
+  { prefix: 'qwen2.5-72b',          input: 0.23,  output: 0.40,  label: 'Qwen 2.5 72B' },
+  { prefix: 'qwen2.5',              input: 0.07,  output: 0.12,  label: 'Qwen 2.5' },
+  { prefix: 'gemma',                input: 0.00,  output: 0.00,  label: 'Gemma (local)' },
+  { prefix: 'phi-4',                input: 0.00,  output: 0.00,  label: 'Phi-4 (local)' },
+];
+
+function lookupPricing(modelName: string) {
+  if (!modelName) return null;
+  const lower = modelName.toLowerCase();
+  // Longest matching prefix wins (entries are ordered most-specific first)
+  return TOKEN_PRICING.find((p) => lower.startsWith(p.prefix)) ?? null;
+}
 
 interface PerModelStats {
   provider: string;
@@ -76,13 +109,28 @@ function formatTokens(n: number): string {
   return String(n);
 }
 
-function estimateCost(stats: TokenStats): string | null {
-  if (!stats.model_name) return null;
-  const pricing = TOKEN_PRICING[stats.model_name];
+function modelCost(input: number, output: number, modelName: string): number | null {
+  const pricing = lookupPricing(modelName);
   if (!pricing) return null;
-  const cost = (stats.input_tokens / 1_000_000) * pricing.input
-             + (stats.output_tokens / 1_000_000) * pricing.output;
-  return cost < 0.01 ? '<$0.01' : `$${cost.toFixed(2)}`;
+  return (input / 1_000_000) * pricing.input + (output / 1_000_000) * pricing.output;
+}
+
+function estimateTotalCost(stats: TokenStats): string | null {
+  // Sum costs across each model's actual token counts for accuracy
+  if (stats.per_model && stats.per_model.length > 0) {
+    let total = 0;
+    let anyPriced = false;
+    for (const m of stats.per_model) {
+      const c = modelCost(m.input_tokens, m.output_tokens, m.model_name);
+      if (c !== null) { total += c; anyPriced = true; }
+    }
+    if (anyPriced) return total < 0.01 ? '<$0.01' : `$${total.toFixed(2)}`;
+  }
+  // Fallback: use active model price × total tokens (single-model case)
+  if (!stats.model_name) return null;
+  const c = modelCost(stats.input_tokens, stats.output_tokens, stats.model_name);
+  if (c === null) return null;
+  return c < 0.01 ? '<$0.01' : `$${c.toFixed(2)}`;
 }
 
 const PROVIDERS: Array<{
@@ -247,8 +295,8 @@ export default function AIConfigTab() {
     );
   }
 
-  const estimatedCost = tokenStats ? estimateCost(tokenStats) : null;
-  const pricingInfo = tokenStats?.model_name ? TOKEN_PRICING[tokenStats.model_name] : null;
+  const estimatedCost = tokenStats ? estimateTotalCost(tokenStats) : null;
+  const pricingInfo = tokenStats?.model_name ? lookupPricing(tokenStats.model_name) : null;
 
   return (
     <div className="grid gap-6 lg:grid-cols-2 items-start">
@@ -566,13 +614,11 @@ export default function AIConfigTab() {
                   <p className="text-xs font-medium text-muted-foreground uppercase tracking-wide">Usage by Model</p>
                   <div className="rounded-xl border border-border/60 overflow-hidden divide-y divide-border/40">
                     {tokenStats.per_model.map((m) => {
-                      const pricing = TOKEN_PRICING[m.model_name];
-                      const cost = pricing
-                        ? (m.input_tokens / 1_000_000) * pricing.input + (m.output_tokens / 1_000_000) * pricing.output
-                        : null;
-                      const pct = tokenStats.total_tokens > 0
-                        ? Math.round((m.total_tokens / (tokenStats.input_tokens + tokenStats.output_tokens)) * 100)
-                        : 0;
+                      const pricing = lookupPricing(m.model_name);
+                      const cost = modelCost(m.input_tokens, m.output_tokens, m.model_name);
+                      const totalUsed = tokenStats.input_tokens + tokenStats.output_tokens;
+                      const modelUsed = m.input_tokens + m.output_tokens;
+                      const pct = totalUsed > 0 ? Math.round((modelUsed / totalUsed) * 100) : 0;
                       return (
                         <div key={`${m.provider}-${m.model_name}`} className="flex items-center gap-3 px-4 py-2.5">
                           <div className="flex-1 min-w-0">

@@ -30,8 +30,11 @@ import {
   FileText,
   ChevronDown,
   ChevronUp,
+  Grid3x3,
+  Upload,
 } from 'lucide-react';
 import { Field, FieldLabel, FieldDescription, FieldError } from '@/components/ui/field';
+import { ImportDrawioButton } from '@/components/ImportDrawioButton';
 import { toast } from 'sonner';
 
 interface Framework {
@@ -46,7 +49,7 @@ interface Props {
   onSuccess: () => void;
 }
 
-const STEPS = ['Product', 'Diagram', 'Framework'];
+const STEPS = ['Product', 'Diagram', 'Model'];
 
 export default function CreateProductWizard({ open, onOpenChange, onSuccess }: Props) {
   const navigate = useNavigate();
@@ -70,10 +73,14 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
   const [ownerEmail, setOwnerEmail] = useState('');
 
   // Step 2
+  const [diagramMode, setDiagramMode] = useState<'choose' | 'blank' | 'import'>('choose');
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
+  const [createdProductId, setCreatedProductId] = useState<number | null>(null);
   const [diagramName, setDiagramName] = useState('Main Architecture');
   const [diagramError, setDiagramError] = useState('');
 
   // Step 3
+  const [modelMode, setModelMode] = useState<'choose' | 'frameworks'>('choose');
   const [selectedFrameworks, setSelectedFrameworks] = useState<number[]>([]);
   const [frameworkError, setFrameworkError] = useState('');
 
@@ -93,8 +100,12 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
     setBusinessArea('');
     setOwnerName('');
     setOwnerEmail('');
+    setDiagramMode('choose');
+    setImportDialogOpen(false);
+    setCreatedProductId(null);
     setDiagramName('Main Architecture');
     setDiagramError('');
+    setModelMode('choose');
     setSelectedFrameworks([]);
     setFrameworkError('');
     setSubmitting(false);
@@ -116,16 +127,29 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
       setProductError('');
       setStep(2);
     } else if (step === 2) {
-      if (!diagramName.trim()) {
-        setDiagramError('Diagram name is required.');
-        return;
+      if (diagramMode === 'blank') {
+        if (!diagramName.trim()) {
+          setDiagramError('Diagram name is required.');
+          return;
+        }
+        setDiagramError('');
       }
-      setDiagramError('');
       setStep(3);
     }
   };
 
-  const goBack = () => setStep((s) => s - 1);
+  const goBack = () => {
+    if (step === 3 && modelMode === 'frameworks') {
+      setModelMode('choose');
+    } else if (step === 2 && diagramMode === 'blank') {
+      setDiagramMode('choose');
+    } else if (step === 3 && diagramMode === 'import') {
+      setDiagramMode('choose');
+      setStep(2);
+    } else {
+      setStep((s) => s - 1);
+    }
+  };
 
   const toggleFramework = (id: number) => {
     setFrameworkError('');
@@ -134,11 +158,21 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
     );
   };
 
+  const createFrameworkModels = async (diagramId: number) => {
+    if (selectedFrameworks.length === 0) return;
+    await Promise.all(
+      selectedFrameworks.map((fwId) => {
+        const fw = frameworks.find((f) => f.id === fwId);
+        return modelsApi.create({
+          diagram_id: diagramId,
+          framework_id: fwId,
+          name: fw ? `${fw.name} Analysis` : 'Analysis',
+        });
+      })
+    );
+  };
+
   const handleSubmit = async () => {
-    if (selectedFrameworks.length === 0) {
-      setFrameworkError('Select at least one framework.');
-      return;
-    }
     setSubmitting(true);
     try {
       const productRes = await productsApi.create({
@@ -153,30 +187,29 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
         owner_name: ownerName.trim() || null,
         owner_email: ownerEmail.trim() || null,
       });
-      const productId: number = productRes.data.id;
+      const newProductId: number = productRes.data.id;
 
-      const diagramRes = await diagramsApi.create({
-        product_id: productId,
-        name: diagramName.trim(),
-        diagram_data: { nodes: [], edges: [] },
-      });
-      const diagramId: number = diagramRes.data.id;
+      if (diagramMode !== 'import') {
+        const diagramRes = await diagramsApi.create({
+          product_id: newProductId,
+          name: diagramName.trim(),
+          diagram_data: { nodes: [], edges: [] },
+        });
+        const diagramId: number = diagramRes.data.id;
+        await createFrameworkModels(diagramId);
 
-      await Promise.all(
-        selectedFrameworks.map((fwId) => {
-          const fw = frameworks.find((f) => f.id === fwId);
-          return modelsApi.create({
-            diagram_id: diagramId,
-            framework_id: fwId,
-            name: fw ? `${fw.name} Analysis` : 'Analysis',
-          });
-        })
-      );
-
-      onSuccess();
-      onOpenChange(false);
-      toast.success('Product created successfully');
-      navigate(`/diagrams?product=${productId}&diagram=${diagramId}`);
+        onSuccess();
+        onOpenChange(false);
+        toast.success('Product created successfully');
+        navigate(`/diagrams?product=${newProductId}&diagram=${diagramId}`);
+      } else {
+        // Import mode: open import dialog; frameworks are applied inside onImportSuccess
+        setCreatedProductId(newProductId);
+        onSuccess();
+        onOpenChange(false);
+        toast.success('Product created — import your diagram below');
+        setImportDialogOpen(true);
+      }
     } catch (err) {
       console.error('Wizard submit error:', err);
       toast.error('Failed to create product');
@@ -186,6 +219,7 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
   };
 
   return (
+    <>
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="sm:max-w-[500px]">
 
@@ -231,13 +265,15 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
         <DialogHeader>
           <DialogTitle>
             {step === 1 && 'New Product'}
-            {step === 2 && 'Create a Diagram'}
-            {step === 3 && 'Select Frameworks'}
+            {step === 2 && (diagramMode === 'choose' ? 'Set Up a Diagram' : 'Name Your Diagram')}
+            {step === 3 && (modelMode === 'choose' ? 'Set Up a Model' : 'Select Frameworks')}
           </DialogTitle>
           <DialogDescription>
             {step === 1 && 'Give your product a name and optional description.'}
-            {step === 2 && 'Name the first diagram for this product. You can add more later.'}
-            {step === 3 && 'Choose the threat modeling frameworks to apply to this diagram.'}
+            {step === 2 && diagramMode === 'choose' && 'Start with a blank canvas or import an existing file.'}
+            {step === 2 && diagramMode === 'blank' && 'Give your diagram a name. You can add more diagrams later.'}
+            {step === 3 && modelMode === 'choose' && 'Would you like to add a threat model to this diagram?'}
+            {step === 3 && modelMode === 'frameworks' && 'Choose the threat modeling frameworks to apply to this diagram.'}
           </DialogDescription>
         </DialogHeader>
 
@@ -414,8 +450,44 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
             </div>
           )}
 
-          {/* Step 2: Diagram */}
-          {step === 2 && (
+          {/* Step 2: Diagram — choose type */}
+          {step === 2 && diagramMode === 'choose' && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Start with a blank canvas or import an existing Draw.io file.</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setDiagramMode('blank')}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-5 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10">
+                    <Grid3x3 className="h-5 w-5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Blank Canvas</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">Start from scratch</p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => { setDiagramMode('import'); setDiagramName('Imported Diagram'); setStep(3); }}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-5 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10">
+                    <Upload className="h-5 w-5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Import Draw.io</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">.drawio or .xml file</p>
+                  </div>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 2: Diagram — blank name input */}
+          {step === 2 && diagramMode === 'blank' && (
             <div className="space-y-4">
               <Field>
                 <FieldLabel htmlFor="wiz-diagram-name">
@@ -426,10 +498,7 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
                 <Input
                   id="wiz-diagram-name"
                   value={diagramName}
-                  onChange={(e) => {
-                    setDiagramName(e.target.value);
-                    setDiagramError('');
-                  }}
+                  onChange={(e) => { setDiagramName(e.target.value); setDiagramError(''); }}
                   onKeyDown={(e) => e.key === 'Enter' && goNext()}
                   autoFocus
                 />
@@ -441,8 +510,49 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
             </div>
           )}
 
-          {/* Step 3: Frameworks */}
-          {step === 3 && (
+          {/* Step 3: Model — choose */}
+          {step === 3 && modelMode === 'choose' && (
+            <div className="space-y-3">
+              <p className="text-xs text-muted-foreground">Threat models help you identify risks and attack surfaces. You can always add one later.</p>
+              <div className="grid grid-cols-2 gap-3">
+                <button
+                  type="button"
+                  onClick={() => setModelMode('frameworks')}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-5 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-full bg-primary/10">
+                    <FileText className="h-5 w-5 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Create Model</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">Pick a framework</p>
+                  </div>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => handleSubmit()}
+                  disabled={submitting}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-5 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40 disabled:opacity-50"
+                >
+                  <div className="flex h-11 w-11 items-center justify-center rounded-full bg-muted">
+                    {submitting ? (
+                      <Loader2 className="h-5 w-5 animate-spin text-muted-foreground" />
+                    ) : (
+                      <ArrowRight className="h-5 w-5 text-muted-foreground" />
+                    )}
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Skip for Now</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">Add models later</p>
+                  </div>
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Step 3: Model — frameworks */}
+          {step === 3 && modelMode === 'frameworks' && (
             <div className="space-y-2">
               {loadingFrameworks ? (
                 <div className="flex items-center justify-center py-8">
@@ -482,7 +592,6 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
                               : 'border-border bg-background hover:border-border/80 hover:bg-muted/40'
                           }`}
                         >
-                          {/* Custom checkbox */}
                           <div
                             className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${
                               selected
@@ -532,17 +641,23 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
             </Button>
           )}
 
-          {step < 3 ? (
+          {step < 3 && !(step === 2 && diagramMode === 'choose') && (
             <Button onClick={goNext}>
               Next
               <ArrowRight className="ml-1.5 h-4 w-4" />
             </Button>
-          ) : (
+          )}
+          {step === 3 && modelMode === 'frameworks' && (
             <Button onClick={handleSubmit} disabled={submitting || loadingFrameworks}>
               {submitting ? (
                 <>
                   <Loader2 className="mr-1.5 h-4 w-4 animate-spin" />
                   Creating…
+                </>
+              ) : diagramMode === 'import' ? (
+                <>
+                  Create &amp; Import
+                  <ArrowRight className="ml-1.5 h-4 w-4" />
                 </>
               ) : (
                 <>
@@ -555,5 +670,19 @@ export default function CreateProductWizard({ open, onOpenChange, onSuccess }: P
         </DialogFooter>
       </DialogContent>
     </Dialog>
+
+    {/* Controlled import dialog — opens after product creation in "import" mode */}
+    {createdProductId && (
+      <ImportDrawioButton
+        productId={createdProductId}
+        onImportSuccess={async (diagramId) => {
+          await createFrameworkModels(diagramId);
+          navigate(`/diagrams?product=${createdProductId}&diagram=${diagramId}`);
+        }}
+        open={importDialogOpen}
+        onOpenChange={setImportDialogOpen}
+      />
+    )}
+  </>
   );
 }

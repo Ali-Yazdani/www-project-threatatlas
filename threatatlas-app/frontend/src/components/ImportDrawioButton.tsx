@@ -80,21 +80,23 @@ function NodeTypeIcon({ type, className }: { type: NodeType; className?: string 
  * "<b>S3</b><br>Context analyzer" — we want just "S3".
  */
 function stripHtml(s: string): string {
-  // `&amp;` last avoids double-unescape (CodeQL js/double-escaping).
+  // `&amp;` is decoded last; a second `&nbsp;` pass catches `&amp;nbsp;` → `&nbsp;` → space.
   const decoded = s
     .replace(/&nbsp;/g, ' ')
+    .replace(/&#160;/g, ' ')
     .replace(/&#39;/g, "'")
     .replace(/&quot;/g, '"')
     .replace(/&lt;/g, '<')
     .replace(/&gt;/g, '>')
-    .replace(/&amp;/g, '&');
+    .replace(/&amp;/g, '&')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/&#160;/g, ' ');
 
-  // Normalize known line-boundary tags to '\n', then strip angle brackets.
-  // Use single-character sanitization to avoid incomplete multi-character removal.
+  // Normalize known line-boundary tags to '\n', then strip all remaining tags.
   const withLineBreaks = decoded
     .replace(/<br\s*\/?>/gi, '\n')
     .replace(/<\/?(p|div|h[1-6]|li)\b[^>]*>/gi, '\n');
-  const text = withLineBreaks.replace(/[<>]/g, '');
+  const text = withLineBreaks.replace(/<[^>]*>/g, '');
 
   const firstLine =
     text
@@ -102,6 +104,53 @@ function stripHtml(s: string): string {
       .map((l) => l.trim())
       .filter(Boolean)[0] ?? '';
   return firstLine;
+}
+
+/**
+ * Derive a human-readable default name from the draw.io shape style when the
+ * cell has no label. Covers common AWS, GCP, Azure, and generic shapes.
+ */
+function shapeDefaultName(style: string): string {
+  const s = style.toLowerCase();
+  // AWS compute
+  if (s.includes('lambda'))                          return 'Lambda Function';
+  if (s.includes('api_gateway') || s.includes('apigw')) return 'API Gateway';
+  if (s.includes('fargate'))                         return 'Fargate Task';
+  if (s.includes('ecs'))                             return 'ECS Service';
+  if (s.includes('eks'))                             return 'EKS Cluster';
+  if (s.includes('ec2'))                             return 'EC2 Instance';
+  if (s.includes('eventbridge'))                     return 'EventBridge';
+  // AWS storage / messaging
+  if (s.includes('dynamodb') || s.includes('dynamo_db')) return 'DynamoDB';
+  if (s.includes('kinesis'))                         return 'Kinesis';
+  if (s.includes('elasticache'))                     return 'ElastiCache';
+  if (s.includes('aurora'))                          return 'Aurora';
+  if (s.includes('rds'))                             return 'RDS';
+  if (s.includes('documentdb'))                      return 'DocumentDB';
+  if (s.includes('sqs'))                             return 'SQS Queue';
+  if (s.includes('sns'))                             return 'SNS Topic';
+  if (s.includes('s3'))                              return 'S3 Bucket';
+  if (s.includes('efs'))                             return 'EFS';
+  // GCP
+  if (s.includes('gcp2.function'))                   return 'Cloud Function';
+  if (s.includes('gcp2.kubernetes'))                 return 'GKE Cluster';
+  if (s.includes('gcp2.cloud_sql'))                  return 'Cloud SQL';
+  if (s.includes('gcp2.cloud_storage'))              return 'Cloud Storage';
+  if (s.includes('gcp2.cloud_pub_sub'))              return 'Pub/Sub';
+  // Azure
+  if (s.includes('azure.function'))                  return 'Azure Function';
+  if (s.includes('azure.kubernetes'))                return 'AKS Cluster';
+  if (s.includes('azure.sql'))                       return 'Azure SQL';
+  if (s.includes('azure.blob'))                      return 'Blob Storage';
+  if (s.includes('azure.cosmos_db'))                 return 'Cosmos DB';
+  if (s.includes('azure.queue'))                     return 'Azure Queue';
+  if (s.includes('azure.app_service'))               return 'App Service';
+  // Generic shapes
+  if (s.includes('cylinder') || s.includes('database')) return 'Database';
+  if (s.includes('umlactor') || s.includes('shape=actor')) return 'User';
+  if (s.includes('ellipse') || s.includes('doubleellipse')) return 'Process';
+  if (s.includes('swimlane'))                        return 'Trust Boundary';
+  return '';
 }
 
 /** Parse a single style key, e.g. "exitX=1" → 1. */
@@ -590,7 +639,7 @@ async function parseDrawioXml(xmlStr: string): Promise<{ nodes: ParsedNode[]; ed
     const t = detectNodeType(cell.style, cell.label, cell.width, cell.height);
     const node: ParsedNode = {
       id:            `drawio-${cell.id}`,
-      label:         cell.label || `Element ${cell.id}`,
+      label:         cell.label || shapeDefaultName(cell.style) || `Element ${cell.id}`,
       type:          t,
       layoutType:    t,
       x:             ax,
@@ -640,15 +689,30 @@ async function parseDrawioXml(xmlStr: string): Promise<{ nodes: ParsedNode[]; ed
 interface ImportDrawioButtonProps {
   productId: number;
   onImportSuccess: (diagramId: number) => void;
+  /** Controlled open state — when provided the trigger button is hidden. */
+  open?: boolean;
+  onOpenChange?: (v: boolean) => void;
+  /** When set, replaces this diagram's content instead of creating a new diagram. */
+  targetDiagramId?: number;
+  /** Pre-fills the diagram name field (used in replace mode). */
+  initialName?: string;
 }
 
 type Step = 'upload' | 'remap';
 
-export function ImportDrawioButton({ productId, onImportSuccess }: ImportDrawioButtonProps) {
-  const [open,  setOpen]  = useState(false);
+export function ImportDrawioButton({ productId, onImportSuccess, open: controlledOpen, onOpenChange: controlledOnOpenChange, targetDiagramId, initialName }: ImportDrawioButtonProps) {
+  const [internalOpen, setInternalOpen] = useState(false);
+  const isControlled = controlledOpen !== undefined;
+  const open  = isControlled ? controlledOpen : internalOpen;
+  const setOpen = isControlled
+    ? (v: boolean) => controlledOnOpenChange?.(v)
+    : setInternalOpen;
+
+  const isReplaceMode = targetDiagramId !== undefined;
+
   const [step,  setStep]  = useState<Step>('upload');
   const [file,  setFile]  = useState<File | null>(null);
-  const [name,  setName]  = useState('');
+  const [name,  setName]  = useState(initialName ?? '');
   const [parsing,    setParsing]    = useState(false);
   const [aiParsing,  setAiParsing]  = useState(false);
   const [importing,  setImporting]  = useState(false);
@@ -658,7 +722,7 @@ export function ImportDrawioButton({ productId, onImportSuccess }: ImportDrawioB
   const [useAiAssist, setUseAiAssist] = useState(false);
 
   const reset = () => {
-    setStep('upload'); setFile(null); setName('');
+    setStep('upload'); setFile(null); setName(initialName ?? '');
     setParseError(null); setNodes([]); setEdges([]);
     setAiParsing(false);
   };
@@ -795,10 +859,17 @@ export function ImportDrawioButton({ productId, onImportSuccess }: ImportDrawioB
         })),
       };
 
-      const res = await diagramsApi.create({ product_id: productId, name: name.trim(), diagram_data: diagramData });
-      toast.success(`"${name}" imported — ${nodes.length} elements, ${edges.length} flows`);
-      handleOpenChange(false);
-      onImportSuccess(res.data.id);
+      if (isReplaceMode) {
+        await diagramsApi.update(targetDiagramId!, { name: name.trim(), diagram_data: diagramData });
+        toast.success(`Diagram replaced — ${nodes.length} elements, ${edges.length} flows`);
+        handleOpenChange(false);
+        onImportSuccess(targetDiagramId!);
+      } else {
+        const res = await diagramsApi.create({ product_id: productId, name: name.trim(), diagram_data: diagramData });
+        toast.success(`"${name}" imported — ${nodes.length} elements, ${edges.length} flows`);
+        handleOpenChange(false);
+        onImportSuccess(res.data.id);
+      }
     } catch {
       toast.error('Import failed. Please try again.');
     } finally { setImporting(false); }
@@ -808,10 +879,12 @@ export function ImportDrawioButton({ productId, onImportSuccess }: ImportDrawioB
 
   return (
     <>
-      <Button variant="outline" size="sm" className="h-10 px-3" onClick={() => setOpen(true)}>
-        <Upload className="h-4 w-4 mr-2" />
-        Import Draw.io
-      </Button>
+      {!isControlled && (
+        <Button variant="outline" size="sm" className="h-10 px-3" onClick={() => setOpen(true)}>
+          <Upload className="h-4 w-4 mr-2" />
+          Import Draw.io
+        </Button>
+      )}
 
       <Dialog open={open} onOpenChange={handleOpenChange}>
         <DialogContent className={cn("max-h-[90vh] overflow-hidden", step === 'remap' ? "sm:max-w-4xl" : "sm:max-w-2xl")}>
@@ -820,12 +893,12 @@ export function ImportDrawioButton({ productId, onImportSuccess }: ImportDrawioB
           {step === 'upload' && (
             <>
               <DialogHeader>
-                <DialogTitle>Import Draw.io Diagram</DialogTitle>
+                <DialogTitle>{isReplaceMode ? 'Replace Current Diagram' : 'Import Draw.io Diagram'}</DialogTitle>
                 <DialogDescription>
-                  Supports <code className="font-mono text-xs">.xml</code> and{' '}
-                  <code className="font-mono text-xs">.drawio</code> files — including multi-page,
-                  compressed, and cloud-exported formats. Shapes are auto-detected and you can
-                  remap any element before importing.
+                  {isReplaceMode
+                    ? 'Upload a Draw.io file to replace the content of this diagram. The existing elements will be overwritten.'
+                    : <>Supports <code className="font-mono text-xs">.xml</code> and{' '}<code className="font-mono text-xs">.drawio</code> files — including multi-page, compressed, and cloud-exported formats. Shapes are auto-detected and you can remap any element before importing.</>
+                  }
                 </DialogDescription>
               </DialogHeader>
 
@@ -970,7 +1043,7 @@ export function ImportDrawioButton({ productId, onImportSuccess }: ImportDrawioB
                 </Button>
                 <Button variant="outline" onClick={() => setStep('upload')}>Back</Button>
                 <Button onClick={handleImport} disabled={importing}>
-                  {importing ? 'Importing…' : `Import ${nodes.length} elements`}
+                  {importing ? (isReplaceMode ? 'Replacing…' : 'Importing…') : (isReplaceMode ? `Replace with ${nodes.length} elements` : `Import ${nodes.length} elements`)}
                 </Button>
               </DialogFooter>
             </>

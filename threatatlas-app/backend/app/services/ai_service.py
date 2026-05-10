@@ -113,85 +113,146 @@ async def stream_chat(
     )
     history = _build_message_history(history_msgs)
 
+    events_queue: asyncio.Queue = asyncio.Queue()
     deps = AgentDeps(
         db=db,
         diagram_id=conversation.diagram_id,
         conversation_id=conversation.id,
         model_id=active_model_id,
         framework_id=framework_id,
+        events_queue=events_queue,
     )
 
     agent = build_agent(config)
     all_chunks: list[str] = []
+
+    # Immediate heartbeat keeps SSE connection alive before the agent starts
+    yield ": heartbeat\n\n"
 
     max_attempts = 3
     last_exc: Exception | None = None
 
     for attempt in range(1, max_attempts + 1):
         all_chunks.clear()
-        try:
-            from pydantic_ai.usage import UsageLimits
-            async with agent.run_stream(
-                user_message,
-                message_history=history,
-                deps=deps,
-                usage_limits=UsageLimits(request_limit=300),
-            ) as result:
-                async for chunk in result.stream_text(delta=True):
-                    all_chunks.append(chunk)
-                    yield f'data: {json.dumps({"delta": chunk})}\n\n'
-
-            full_text = "".join(all_chunks)
-            proposals = deps.proposals
-
-            # Extract token usage from pydantic-ai result
-            input_tokens: int | None = None
-            output_tokens: int | None = None
+        # Drain leftover events from a previous attempt
+        while not events_queue.empty():
             try:
-                usage = result.usage()
-                input_tokens = usage.request_tokens
-                output_tokens = usage.response_tokens
-            except Exception as e:
-                logger.debug("Token usage unavailable from agent result: %s", e)
+                events_queue.get_nowait()
+            except asyncio.QueueEmpty:
+                break
 
-            # Persist assistant message + proposals
-            assistant_msg = AIMessage(
-                conversation_id=conversation.id,
-                role="assistant",
-                content=full_text,
-                proposals=proposals if proposals else None,
-                input_tokens=input_tokens,
-                output_tokens=output_tokens,
-                token_count=(input_tokens or 0) + (output_tokens or 0) or None,
-                ai_model_name=config.model_name,
-                ai_provider=config.provider,
-            )
-            db.add(assistant_msg)
-            db.commit()
-            db.refresh(assistant_msg)
+        from pydantic_ai.usage import UsageLimits
 
-            yield f'data: {json.dumps({"done": True, "message": {"id": assistant_msg.id, "role": "assistant", "content": full_text, "proposals": proposals, "created_at": assistant_msg.created_at.isoformat()}})}\n\n'
-            return
+        run_state: dict = {"result": None, "exc": None}
 
-        except Exception as exc:
+        async def _agent_run() -> None:
+            try:
+                run_state["result"] = await agent.run(
+                    user_message,
+                    message_history=history,
+                    deps=deps,
+                    usage_limits=UsageLimits(request_limit=150),
+                )
+            except Exception as _exc:
+                run_state["exc"] = _exc
+            finally:
+                # Sentinel — always signals completion even on error
+                await events_queue.put(None)
+
+        task = asyncio.create_task(_agent_run())
+        timed_out = False
+        _TIMEOUT = 360.0
+
+        try:
+            end_time = asyncio.get_event_loop().time() + _TIMEOUT
+            while True:
+                remaining = end_time - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    task.cancel()
+                    timed_out = True
+                    break
+                try:
+                    event = await asyncio.wait_for(events_queue.get(), timeout=min(remaining, 5.0))
+                except asyncio.TimeoutError:
+                    yield ": keepalive\n\n"  # prevent browser/proxy from closing idle SSE
+                    continue  # check remaining budget and wait again
+                if event is None:  # sentinel — agent finished or failed
+                    break
+                yield f'data: {json.dumps(event)}\n\n'
+        finally:
+            if not task.done():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+
+        if timed_out:
+            last_exc = asyncio.TimeoutError()
+            logger.error("AI stream error: agent run timed out after %.0fs", _TIMEOUT)
+            break
+
+        if run_state["exc"] is not None:
+            exc = run_state["exc"]
             last_exc = exc
-            # Retry only on rate-limit errors and only if no partial chunks were emitted.
-            # If chunks were already streamed, retrying would duplicate/garble output.
             if _is_rate_limit_error(exc) and not all_chunks and attempt < max_attempts:
                 wait_seconds = _extract_retry_after_seconds(exc)
                 logger.warning(
                     "AI rate-limited (attempt %s/%s), retrying in %.2fs",
-                    attempt, max_attempts, wait_seconds
+                    attempt, max_attempts, wait_seconds,
                 )
                 await asyncio.sleep(wait_seconds)
                 continue
             break
 
+        result = run_state["result"]
+        full_text = result.output or ""
+        proposals = deps.proposals
+
+        # Simulate streaming — yield text in small chunks so the cursor animates
+        _CHUNK = 80
+        for _i in range(0, len(full_text), _CHUNK):
+            _part = full_text[_i:_i + _CHUNK]
+            all_chunks.append(_part)
+            yield f'data: {json.dumps({"delta": _part})}\n\n'
+            await asyncio.sleep(0)
+
+        # Extract token usage
+        input_tokens: int | None = None
+        output_tokens: int | None = None
+        try:
+            usage = result.usage()
+            input_tokens = getattr(usage, "input_tokens", None) or getattr(usage, "request_tokens", None)
+            output_tokens = getattr(usage, "output_tokens", None) or getattr(usage, "response_tokens", None)
+        except Exception as e:
+            logger.debug("Token usage unavailable from agent result: %s", e)
+
+        # Persist assistant message + proposals
+        assistant_msg = AIMessage(
+            conversation_id=conversation.id,
+            role="assistant",
+            content=full_text,
+            proposals=proposals if proposals else None,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            token_count=(input_tokens or 0) + (output_tokens or 0) or None,
+            ai_model_name=config.model_name,
+            ai_provider=config.provider,
+        )
+        db.add(assistant_msg)
+        db.commit()
+        db.refresh(assistant_msg)
+
+        yield f'data: {json.dumps({"done": True, "message": {"id": assistant_msg.id, "role": "assistant", "content": full_text, "proposals": proposals, "created_at": assistant_msg.created_at.isoformat()}})}\n\n'
+        return
+
     if last_exc:
         logger.error("AI stream error: %s", last_exc, exc_info=last_exc)
     else:
         logger.error("AI stream error: unknown error")
-    if last_exc and _is_rate_limit_error(last_exc):
+    if isinstance(last_exc, asyncio.TimeoutError):
+        yield f'data: {json.dumps({"error": "AI request timed out. The analysis may be too large — try asking for a specific element or flow."})}\n\n'
+    elif last_exc and _is_rate_limit_error(last_exc):
         yield f'data: {json.dumps({"error": "AI provider is temporarily rate-limited. Please retry in a few seconds."})}\n\n'
     else:
         yield f'data: {json.dumps({"error": "AI request failed. Please try again later."})}\n\n'
@@ -249,13 +310,25 @@ def approve_proposal(
 
         framework = db.query(Framework).filter(Framework.id == framework_id).first()
 
-        # Patch all sibling proposals in this message that have model_id=None
+        # Patch sibling proposals so they point to the newly created model.
+        # Proposals explicitly linked via pending_model_proposal_id take priority
+        # (multi-framework: STRIDE proposals only patch when the STRIDE model is approved).
+        # Fall back to the old model_id=None heuristic for backward-compat proposals
+        # that carry no explicit link.
+        _model_bearing_types = {"threat", "mitigation", "suggest_kb_threat", "suggest_kb_mitigation"}
         patched: list[dict] = []
         for p in proposals:
             if p["id"] == proposal_id:
                 patched.append({**p, "status": "approved"})
-            elif p.get("model_id") is None and p.get("type") in ("threat", "mitigation"):
-                patched.append({**p, "model_id": new_model.id})
+            elif p.get("type") in _model_bearing_types:
+                if p.get("pending_model_proposal_id") == proposal_id:
+                    # Explicitly linked to this create_model — always patch
+                    patched.append({**p, "model_id": new_model.id, "framework_id": framework_id})
+                elif p.get("model_id") is None and p.get("pending_model_proposal_id") is None:
+                    # Backward-compat: orphaned proposal with no explicit link
+                    patched.append({**p, "model_id": new_model.id})
+                else:
+                    patched.append(p)
             else:
                 patched.append(p)
         message.proposals = patched

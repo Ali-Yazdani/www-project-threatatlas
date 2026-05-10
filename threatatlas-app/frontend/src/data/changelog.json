@@ -1,5 +1,36 @@
 [
   {
+    "version": "0.6.1",
+    "date": "2026-05-10",
+    "tag": "feature",
+    "entries": [
+      {
+        "type": "added",
+        "text": "New Diagram Wizard: replaced the simple 'New Diagram' button with a guided choice between starting from a blank canvas or importing an existing Draw.io (.drawio/.xml) file."
+      },
+      {
+        "type": "improved",
+        "text": "AI Threat Modeling Assistant: complete overhaul of the chat interface with rich markdown support (tables, fenced code blocks, blockquotes), real-time 'thinking' status updates, and improved proposal management (add/remove threats and mitigations)."
+      },
+      {
+        "type": "improved",
+        "text": "Diagram canvas performance: refined DiagramNode rendering and selection logic for smoother interaction on complex threat models."
+      },
+      {
+        "type": "improved",
+        "text": "Product workflow: the Import Draw.io tool is now a first-class citizen of the product details page, accessible directly via the New Diagram wizard."
+      },
+      {
+        "type": "improved",
+        "text": "AI Configuration: admin panel now supports more granular provider settings and improved credential management for OpenAI, Anthropic, and compatible providers."
+      },
+      {
+        "type": "fixed",
+        "text": "State synchronization in the Create Product wizard to ensure 'Additional details' are correctly persisted when toggled."
+      }
+    ]
+  },
+  {
     "version": "0.6.0",
     "date": "2026-04-29",
     "tag": "feature",

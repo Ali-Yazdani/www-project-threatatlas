@@ -39,7 +39,7 @@ function HeaderBreadcrumb() {
     switch (location.pathname) {
       case '/': return { title: 'Dashboard' };
       case '/products': return { title: 'Products' };
-      case '/diagrams': return { title: 'Diagrams' };
+      case '/diagrams': return { title: 'Diagrams', parent: { title: 'Products', href: '/products' } };
       case '/analytics': return { title: 'Analytics' };
       case '/knowledge': return { title: 'Knowledge Base' };
       case '/users': return { title: 'User Management' };
@@ -133,7 +133,7 @@ export function App() {
               }
             />
           </Routes>
-          <Toaster position="bottom-right" richColors closeButton />
+          <Toaster position="bottom-right" richColors />
         </AuthProvider>
       </BrowserRouter>
     </ThemeProvider>

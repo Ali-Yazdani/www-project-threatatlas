@@ -31,69 +31,175 @@ import { getElementColor } from '@/lib/designSystem';
 
 // ── Lightweight markdown renderer ────────────────────────────────────────────
 
+function inlineMarkdown(text: string): React.ReactNode {
+  // Handles: **bold**, __bold__, *italic*, _italic_, `code`
+  const parts = text.split(/(\*\*[\s\S]+?\*\*|__[\s\S]+?__|`[^`]+`|\*[\s\S]+?\*|_[\s\S]+?_)/g);
+  return parts.map((part, i) => {
+    if (/^(\*\*|__)/.test(part) && /(\*\*|__)$/.test(part))
+      return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>;
+    if (/^`[^`]+`$/.test(part))
+      return <code key={i} className="font-mono text-[0.82em] bg-muted px-1 py-0.5 rounded">{part.slice(1, -1)}</code>;
+    if (/^(\*|_)[\s\S]+(\*|_)$/.test(part))
+      return <em key={i}>{part.slice(1, -1)}</em>;
+    return part;
+  });
+}
+
+function parseTableRow(line: string): string[] {
+  return line.replace(/^\||\|$/g, '').split('|').map((c) => c.trim());
+}
+
+function isTableSeparator(line: string): boolean {
+  return /^\|?[\s:|-]+\|/.test(line) && /[-]{2,}/.test(line);
+}
+
 function renderMarkdown(text: string): React.ReactNode[] {
   const lines = text.split('\n');
   const elements: React.ReactNode[] = [];
   let listBuffer: string[] = [];
   let listType: 'ul' | 'ol' | null = null;
+  let codeLines: string[] = [];
+  let inCodeBlock = false;
+  // Table state
+  let tableHeaders: string[] = [];
+  let tableRows: string[][] = [];
+  let inTable = false;
   let key = 0;
 
   const flushList = () => {
     if (!listBuffer.length) return;
-    if (listType === 'ul') {
-      elements.push(
-        <ul key={key++} className="my-1.5 pl-4 space-y-0.5 list-disc">
-          {listBuffer.map((item, i) => (
-            <li key={i} className="text-sm leading-relaxed">{inlineMarkdown(item)}</li>
-          ))}
-        </ul>
-      );
-    } else {
-      elements.push(
-        <ol key={key++} className="my-1.5 pl-4 space-y-0.5 list-decimal">
-          {listBuffer.map((item, i) => (
-            <li key={i} className="text-sm leading-relaxed">{inlineMarkdown(item)}</li>
-          ))}
-        </ol>
-      );
-    }
+    const Tag = listType === 'ul' ? 'ul' : 'ol';
+    elements.push(
+      <Tag key={key++} className={`my-1.5 pl-4 space-y-0.5 ${listType === 'ul' ? 'list-disc' : 'list-decimal'}`}>
+        {listBuffer.map((item, i) => (
+          <li key={i} className="text-sm leading-relaxed">{inlineMarkdown(item)}</li>
+        ))}
+      </Tag>
+    );
     listBuffer = [];
     listType = null;
   };
 
+  const flushCode = () => {
+    elements.push(
+      <pre key={key++} className="my-2 rounded-lg bg-muted/70 border border-border/40 px-3 py-2 overflow-x-auto">
+        <code className="font-mono text-[0.8em] leading-relaxed whitespace-pre">{codeLines.join('\n')}</code>
+      </pre>
+    );
+    codeLines = [];
+    inCodeBlock = false;
+  };
+
+  const flushTable = () => {
+    if (!tableHeaders.length) return;
+    elements.push(
+      <div key={key++} className="my-2 overflow-x-auto rounded-lg border border-border/50">
+        <table className="w-full text-sm border-collapse">
+          <thead>
+            <tr className="bg-muted/60 border-b border-border/50">
+              {tableHeaders.map((h, i) => (
+                <th key={i} className="px-3 py-1.5 text-left font-semibold text-foreground/90 whitespace-nowrap">
+                  {inlineMarkdown(h)}
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {tableRows.map((row, ri) => (
+              <tr key={ri} className={ri % 2 === 0 ? '' : 'bg-muted/20'}>
+                {row.map((cell, ci) => (
+                  <td key={ci} className="px-3 py-1.5 border-t border-border/30 align-top">
+                    {inlineMarkdown(cell)}
+                  </td>
+                ))}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    );
+    tableHeaders = [];
+    tableRows = [];
+    inTable = false;
+  };
+
   for (const line of lines) {
-    // Headings
-    if (/^###\s/.test(line)) {
-      flushList();
-      elements.push(<h4 key={key++} className="text-sm font-semibold mt-3 mb-1">{line.replace(/^###\s/, '')}</h4>);
+    // Fenced code block toggle
+    if (/^```/.test(line)) {
+      flushTable();
+      if (inCodeBlock) {
+        flushCode();
+      } else {
+        flushList();
+        inCodeBlock = true;
+      }
       continue;
     }
-    if (/^##\s/.test(line)) {
-      flushList();
-      elements.push(<h3 key={key++} className="text-sm font-semibold mt-3 mb-1">{line.replace(/^##\s/, '')}</h3>);
+    if (inCodeBlock) {
+      codeLines.push(line);
       continue;
     }
-    if (/^#\s/.test(line)) {
+
+    // Table detection: a line with pipes is a table row or separator
+    if (/^\|/.test(line) || (/\|/.test(line) && inTable)) {
+      if (isTableSeparator(line)) {
+        // Separator row — the preceding line was the header
+        inTable = true;
+        continue;
+      }
+      const cells = parseTableRow(line);
+      if (!inTable) {
+        // First pipe row becomes header (separator comes next)
+        flushList();
+        tableHeaders = cells;
+      } else {
+        tableRows.push(cells);
+      }
+      continue;
+    }
+
+    // Non-pipe line exits table mode
+    if (inTable || tableHeaders.length) flushTable();
+
+    // Headings (#### → #)
+    if (/^#{1,4}\s/.test(line)) {
       flushList();
-      elements.push(<h2 key={key++} className="text-base font-semibold mt-3 mb-1">{line.replace(/^#\s/, '')}</h2>);
+      const level = (line.match(/^(#+)/)?.[1].length ?? 1);
+      const content = line.replace(/^#+\s/, '');
+      const cls = level <= 1
+        ? 'text-base font-semibold mt-3 mb-1'
+        : level === 2
+        ? 'text-[0.95rem] font-semibold mt-3 mb-1'
+        : 'text-sm font-semibold mt-2 mb-0.5';
+      elements.push(<p key={key++} className={cls}>{inlineMarkdown(content)}</p>);
+      continue;
+    }
+    // Blockquote
+    if (/^>\s?/.test(line)) {
+      flushList();
+      elements.push(
+        <blockquote key={key++} className="border-l-2 border-primary/40 pl-3 my-1 text-muted-foreground text-sm italic">
+          {inlineMarkdown(line.replace(/^>\s?/, ''))}
+        </blockquote>
+      );
       continue;
     }
     // Bullet list
-    if (/^[-*]\s/.test(line)) {
+    if (/^[-*+]\s/.test(line)) {
       if (listType === 'ol') flushList();
       listType = 'ul';
-      listBuffer.push(line.replace(/^[-*]\s/, ''));
+      listBuffer.push(line.replace(/^[-*+]\s/, ''));
       continue;
     }
     // Ordered list
-    if (/^\d+\.\s/.test(line)) {
+    if (/^\d+[.)]\s/.test(line)) {
       if (listType === 'ul') flushList();
       listType = 'ol';
-      listBuffer.push(line.replace(/^\d+\.\s/, ''));
+      listBuffer.push(line.replace(/^\d+[.)]\s/, ''));
       continue;
     }
     // Horizontal rule
-    if (/^---+$/.test(line.trim())) {
+    if (/^[-*_]{3,}$/.test(line.trim())) {
       flushList();
       elements.push(<Separator key={key++} className="my-2 opacity-40" />);
       continue;
@@ -106,21 +212,9 @@ function renderMarkdown(text: string): React.ReactNode[] {
     }
   }
   flushList();
+  flushTable();
+  if (inCodeBlock) flushCode();
   return elements;
-}
-
-function inlineMarkdown(text: string): React.ReactNode {
-  // Split by bold (**), italic (*), and inline code (`)
-  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/g);
-  return parts.map((part, i) => {
-    if (/^\*\*[^*]+\*\*$/.test(part))
-      return <strong key={i} className="font-semibold">{part.slice(2, -2)}</strong>;
-    if (/^\*[^*]+\*$/.test(part))
-      return <em key={i}>{part.slice(1, -1)}</em>;
-    if (/^`[^`]+`$/.test(part))
-      return <code key={i} className="font-mono text-[0.82em] bg-muted px-1 py-0.5 rounded">{part.slice(1, -1)}</code>;
-    return part;
-  });
 }
 
 // ── Element type icons ────────────────────────────────────────────────────────
@@ -395,7 +489,7 @@ function MessageBubble({
   );
 }
 
-function StreamingBubble({ content }: { content: string }) {
+function StreamingBubble({ content, thinkingStep }: { content: string; thinkingStep?: string }) {
   return (
     <div className="flex flex-col gap-2 items-start">
       <div className="flex items-center gap-1.5">
@@ -408,13 +502,15 @@ function StreamingBubble({ content }: { content: string }) {
       <div className="max-w-[92%] rounded-2xl rounded-tl-sm px-4 py-3 bg-card border border-border/60 shadow-xs">
         {content
           ? <div className="space-y-1">{renderMarkdown(content)}<span className="inline-block w-0.5 h-4 bg-primary ml-0.5 animate-pulse align-text-bottom" /></div>
-          : <div className="flex items-center gap-2 text-muted-foreground text-sm py-0.5">
-              <span className="flex gap-0.5">
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce" style={{ animationDelay: '0ms' }} />
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce" style={{ animationDelay: '150ms' }} />
-                <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce" style={{ animationDelay: '300ms' }} />
-              </span>
-              <span>Thinking…</span>
+          : <div className="flex flex-col gap-1.5">
+              <div className="flex items-center gap-2 text-muted-foreground text-sm py-0.5">
+                <span className="flex gap-0.5">
+                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce" style={{ animationDelay: '0ms' }} />
+                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce" style={{ animationDelay: '150ms' }} />
+                  <span className="h-1.5 w-1.5 rounded-full bg-muted-foreground/60 animate-bounce" style={{ animationDelay: '300ms' }} />
+                </span>
+                <span>{thinkingStep || 'Thinking…'}</span>
+              </div>
             </div>
         }
       </div>
@@ -432,6 +528,7 @@ interface AIChatSheetProps {
   frameworkId: number | null;
   portalContainer?: HTMLElement | null;
   onModelCreated?: (modelId: number, model: { id: number; name: string; framework_id: number; framework_name: string }) => void;
+  onProposalApproved?: () => void;
 }
 
 const SUGGESTIONS: { icon: React.ElementType; label: string; description: string; prompt: string }[] = [
@@ -487,15 +584,15 @@ const SUGGESTIONS: { icon: React.ElementType; label: string; description: string
 
 export default function AIChatSheet({
   open, onOpenChange, diagramId, activeModelId, frameworkId,
-  portalContainer, onModelCreated,
+  portalContainer, onModelCreated, onProposalApproved,
 }: AIChatSheetProps) {
   const {
-    conversations, activeConvId, messages, streamingContent,
+    conversations, activeConvId, messages, streamingContent, thinkingStep,
     isStreaming, isLoading, pendingCount, pendingRemovalCount, pendingModelCount,
     effectiveModelId,
     sendMessage, selectConversation,
     createConversation, deleteConversation, approveProposal, dismissProposal, approveAll, stopStreaming,
-  } = useAIChat({ diagramId, activeModelId, frameworkId, onModelCreated });
+  } = useAIChat({ diagramId, activeModelId, frameworkId, onModelCreated, onProposalApproved });
 
   const [input, setInput] = useState('');
   const [deleteDialogConvId, setDeleteDialogConvId] = useState<number | null>(null);
@@ -710,7 +807,7 @@ export default function AIChatSheet({
                   onDismiss={dismissProposal}
                 />
               ))}
-              {isStreaming && <StreamingBubble content={streamingContent} />}
+              {isStreaming && <StreamingBubble content={streamingContent} thinkingStep={thinkingStep} />}
               <div ref={bottomRef} />
             </div>
           )}

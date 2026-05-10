@@ -62,9 +62,11 @@ import {
   ArrowRight,
   Users,
   Eye,
+  Upload,
 } from 'lucide-react';
 import ShareProductDialog from '@/components/ShareProductDialog';
 import CreateProductWizard from '@/components/CreateProductWizard';
+import { ImportDrawioButton } from '@/components/ImportDrawioButton';
 
 const STATUS_CLASSES: Record<string, string> = {
   design: 'border-sky-500/50 text-sky-700 dark:text-sky-300 bg-sky-500/10',
@@ -221,19 +223,45 @@ export default function Products() {
     }
   };
 
-  const handleCreateDiagram = async (productId: number) => {
+  // ── New Diagram wizard ────────────────────────────────────────────────────
+  const [dgWizProductId,  setDgWizProductId]  = useState<number | null>(null);
+  const [dgWizOpen,       setDgWizOpen]       = useState(false);
+  const [dgWizStep,       setDgWizStep]       = useState<'choose' | 'blank'>('choose');
+  const [dgWizName,       setDgWizName]       = useState('');
+  const [dgWizNameError,  setDgWizNameError]  = useState('');
+  const [dgWizCreating,   setDgWizCreating]   = useState(false);
+  const [dgImportOpen,    setDgImportOpen]    = useState(false);
+
+  const openDiagramWizard = (productId: number) => {
+    setDgWizProductId(productId);
+    setDgWizStep('choose');
+    setDgWizName('');
+    setDgWizNameError('');
+    setDgWizCreating(false);
+    setDgWizOpen(true);
+  };
+
+  const handleCreateBlankDiagram = async () => {
+    if (!dgWizProductId || !dgWizName.trim()) {
+      setDgWizNameError('Diagram name is required.');
+      return;
+    }
     try {
-      const response = await diagramsApi.create({
-        product_id: productId,
-        name: 'New Diagram',
+      setDgWizCreating(true);
+      const res = await diagramsApi.create({
+        product_id: dgWizProductId,
+        name: dgWizName.trim(),
         diagram_data: { nodes: [], edges: [] },
       });
-      navigate(`/diagrams?product=${productId}&diagram=${response.data.id}`);
-    } catch (error) {
-      console.error('Error creating diagram:', error);
+      setDgWizOpen(false);
+      navigate(`/diagrams?product=${dgWizProductId}&diagram=${res.data.id}`);
+    } catch {
       toast.error('Failed to create diagram');
+    } finally {
+      setDgWizCreating(false);
     }
   };
+  // ── End wizard ────────────────────────────────────────────────────────────
 
   const openDeleteDiagramDialog = (e: React.MouseEvent, diagramId: number) => {
     e.stopPropagation();
@@ -456,7 +484,7 @@ export default function Products() {
                               variant="outline"
                               size="sm"
                               data-card-action
-                              onClick={() => handleCreateDiagram(product.id)}
+                              onClick={() => openDiagramWizard(product.id)}
                               className="h-7 text-xs hover:bg-primary/5 hover:border-primary/30 transition-all"
                             >
                               <Plus className="mr-1 h-3 w-3" />
@@ -537,7 +565,7 @@ export default function Products() {
                         size="sm"
                         data-card-action
                         className="flex-1 hover:border-primary/40 hover:bg-primary/5 transition-all shadow-sm hover:shadow"
-                        onClick={() => handleCreateDiagram(product.id)}
+                        onClick={() => openDiagramWizard(product.id)}
                       >
                         <Plus className="mr-1.5 h-3.5 w-3.5" />
                         New Diagram
@@ -707,6 +735,101 @@ export default function Products() {
         onOpenChange={setWizardOpen}
         onSuccess={loadProducts}
       />
+
+      {/* New Diagram Wizard */}
+      <Dialog open={dgWizOpen} onOpenChange={(v) => { if (!v) setDgWizOpen(false); }}>
+        <DialogContent className="sm:max-w-lg">
+
+          {dgWizStep === 'choose' && (
+            <>
+              <DialogHeader>
+                <DialogTitle>New Diagram</DialogTitle>
+                <DialogDescription>Start with a blank canvas or import an existing Draw.io file.</DialogDescription>
+              </DialogHeader>
+
+              <div className="grid grid-cols-2 gap-3 py-2">
+                <button
+                  onClick={() => setDgWizStep('blank')}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-6 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                    <Grid3x3 className="h-6 w-6 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Blank Canvas</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">Start from scratch</p>
+                  </div>
+                </button>
+
+                <button
+                  onClick={() => { setDgWizOpen(false); setDgImportOpen(true); }}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-6 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                    <Upload className="h-6 w-6 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Import Draw.io</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">.drawio or .xml file</p>
+                  </div>
+                </button>
+              </div>
+
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setDgWizOpen(false)}>Cancel</Button>
+              </DialogFooter>
+            </>
+          )}
+
+          {dgWizStep === 'blank' && (
+            <>
+              <DialogHeader>
+                <DialogTitle>Name your diagram</DialogTitle>
+                <DialogDescription>Give this diagram a name — you can always change it later.</DialogDescription>
+              </DialogHeader>
+
+              <div className="space-y-2 py-2">
+                <Label htmlFor="dg-name">Diagram name</Label>
+                <Input
+                  id="dg-name"
+                  value={dgWizName}
+                  onChange={(e) => { setDgWizName(e.target.value); setDgWizNameError(''); }}
+                  placeholder="e.g. Payment Service DFD"
+                  autoFocus
+                  onKeyDown={(e) => e.key === 'Enter' && handleCreateBlankDiagram()}
+                />
+                {dgWizNameError && <p className="text-xs text-destructive">{dgWizNameError}</p>}
+              </div>
+
+              <DialogFooter className="gap-2">
+                <button
+                  className="text-sm text-muted-foreground hover:text-foreground underline-offset-4 hover:underline mr-auto"
+                  onClick={() => setDgWizStep('choose')}
+                >
+                  Back
+                </button>
+                <Button variant="outline" onClick={() => setDgWizOpen(false)}>Cancel</Button>
+                <Button onClick={handleCreateBlankDiagram} disabled={!dgWizName.trim() || dgWizCreating}>
+                  {dgWizCreating ? 'Creating…' : 'Create Diagram'}
+                </Button>
+              </DialogFooter>
+            </>
+          )}
+        </DialogContent>
+      </Dialog>
+
+      {/* Controlled ImportDrawioButton (opened from New Diagram wizard) */}
+      {dgWizProductId && (
+        <ImportDrawioButton
+          productId={dgWizProductId}
+          onImportSuccess={(diagramId) => {
+            loadProducts();
+            navigate(`/diagrams?product=${dgWizProductId}&diagram=${diagramId}`);
+          }}
+          open={dgImportOpen}
+          onOpenChange={setDgImportOpen}
+        />
+      )}
     </div>
   );
 }

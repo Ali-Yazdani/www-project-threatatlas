@@ -93,6 +93,7 @@ function DiagramNode({ data, selected }: NodeProps) {
   const Icon = style.icon;
   const threatCount = (data.threatCount as number) || 0;
   const mitigationCount = (data.mitigationCount as number) || 0;
+  const isDropTarget = (data.isDropTarget as boolean) || false;
 
   // Process - Circle (DFD standard)
   if (style.shape === 'circle') {
@@ -378,22 +379,32 @@ function DiagramNode({ data, selected }: NodeProps) {
         />
         <div
           className={cn(
-            'w-full h-full border-2 border-dashed rounded-lg transition-all duration-200 p-4',
-            selected && 'ring-2 ring-stone-400 ring-offset-2'
+            'w-full h-full border-2 rounded-lg transition-all duration-150 p-4',
+            isDropTarget ? 'border-solid ring-2 ring-primary/40 ring-offset-1' : 'border-dashed',
+            selected && !isDropTarget && 'ring-2 ring-stone-400 ring-offset-2'
           )}
           style={{
-            ...style.bg,
             minWidth: '200px',
             minHeight: '150px',
-            borderColor: style.borderColor,
+            borderColor: isDropTarget ? 'var(--primary)' : style.borderColor,
+            backgroundColor: isDropTarget
+              ? 'color-mix(in srgb, var(--primary) 6%, color-mix(in srgb, var(--element-boundary) 8%, transparent))'
+              : (style.bg as React.CSSProperties).backgroundColor,
           }}
         >
           <div className="flex items-start gap-2 absolute top-2 left-2">
-            <Icon className="h-4 w-4" style={style.iconColor} />
-            <div className="font-medium text-xs" style={style.textColor}>
+            <Icon className="h-4 w-4" style={isDropTarget ? { color: 'var(--primary)' } : style.iconColor} />
+            <div className="font-medium text-xs" style={isDropTarget ? { color: 'var(--primary)' } : style.textColor}>
               {data.label as string}
             </div>
           </div>
+          {isDropTarget && (
+            <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 pointer-events-none">
+              <span className="text-[10px] font-semibold text-primary/70 bg-primary/10 px-2 py-0.5 rounded-full border border-primary/20">
+                Release to attach
+              </span>
+            </div>
+          )}
           <div className="absolute bottom-2 right-2 flex items-center gap-1.5">
             {(threatCount > 0 || mitigationCount > 0) && (
               <div className="flex gap-1">

@@ -23,6 +23,7 @@ export interface Proposal {
   description: string;
   category?: string;
   model_id?: number;
+  pending_model_proposal_id?: string;
   framework_id?: number;
   framework_name?: string;
   reasoning?: string;
@@ -56,13 +57,15 @@ interface UseAIChatOptions {
   activeModelId: number | null;
   frameworkId: number | null;
   onModelCreated?: (modelId: number, model: { id: number; name: string; framework_id: number; framework_name: string }) => void;
+  onProposalApproved?: () => void;
 }
 
-export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreated }: UseAIChatOptions) {
+export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreated, onProposalApproved }: UseAIChatOptions) {
   const [conversations, setConversations] = useState<Conversation[]>([]);
   const [activeConvId, setActiveConvId] = useState<number | null>(null);
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [streamingContent, setStreamingContent] = useState('');
+  const [thinkingStep, setThinkingStep] = useState('');
   const [isStreaming, setIsStreaming] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   // Tracks a model created mid-conversation so subsequent messages use the right model_id
@@ -185,7 +188,10 @@ export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreate
           if (!line.startsWith('data: ')) continue;
           try {
             const data = JSON.parse(line.slice(6));
-            if (data.delta) {
+            if (data.thinking) {
+              setThinkingStep(data.thinking);
+            } else if (data.delta) {
+              setThinkingStep('');
               accumulatedText += data.delta;
               setStreamingContent(accumulatedText);
             } else if (data.done && data.message) {
@@ -224,6 +230,7 @@ export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreate
     } finally {
       setIsStreaming(false);
       setStreamingContent('');
+      setThinkingStep('');
     }
   }, [activeConvId, isStreaming, effectiveModelId, effectiveFrameworkId, createConversation, loadConversations]);
 
@@ -235,19 +242,27 @@ export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreate
       const res = await aiConversationsApi.approveProposal(activeConvId, messageId, proposalId);
       const result = res.data as any;
 
+      const _MODEL_BEARING = new Set(['threat', 'mitigation', 'suggest_kb_threat', 'suggest_kb_mitigation']);
       setMessages((prev) =>
         prev.map((m) => {
           if (m.id !== messageId) return m;
           let updatedProposals = m.proposals?.map((p) =>
             p.id === proposalId ? { ...p, status: 'approved' as const } : p
           );
-          // When a model is created, patch sibling proposals with the new model_id
+          // When a model is created, patch sibling proposals with the new model_id.
+          // Use pending_model_proposal_id for explicit multi-framework linking;
+          // fall back to the old model_id=falsy heuristic for backward compat.
           if (result?.type === 'create_model' && result?.id) {
-            updatedProposals = updatedProposals?.map((p) =>
-              (!p.model_id && (p.type === 'threat' || p.type === 'mitigation'))
-                ? { ...p, model_id: result.id }
-                : p
-            );
+            updatedProposals = updatedProposals?.map((p) => {
+              if (!_MODEL_BEARING.has(p.type)) return p;
+              if (p.pending_model_proposal_id === proposalId) {
+                return { ...p, model_id: result.id };
+              }
+              if (!p.model_id && !p.pending_model_proposal_id) {
+                return { ...p, model_id: result.id };
+              }
+              return p;
+            });
           }
           return { ...m, proposals: updatedProposals };
         })
@@ -264,18 +279,29 @@ export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreate
         });
         toast.success(`Threat model "${result.name}" created`);
       } else if (result?.type === 'update_risk') {
-        toast.success('Risk assessment updated');
+        const sev = result.severity ? ` — ${result.severity.toUpperCase()}` : '';
+        toast.success(`Risk scores saved (${result.likelihood ?? '?'}×${result.impact ?? '?'} = ${result.risk_score ?? '?'}${sev})`);
       } else if (result?.type === 'remove_threat') {
         toast.success('Threat removed from diagram');
       } else if (result?.type === 'remove_mitigation') {
         toast.success('Mitigation removed from diagram');
+      } else if (result?.type === 'suggest_kb_threat') {
+        toast.success('Custom threat added to knowledge base and diagram');
+      } else if (result?.type === 'suggest_kb_mitigation') {
+        toast.success('Custom mitigation added to knowledge base and diagram');
+      } else if (result?.type === 'threat') {
+        toast.success('Threat added to diagram');
+      } else if (result?.type === 'mitigation') {
+        toast.success('Mitigation added to diagram');
       } else {
-        toast.success('Added to diagram');
+        toast.success('Approved');
       }
+      // Notify diagram canvas to refresh T&M badges
+      onProposalApproved?.();
     } catch (err: any) {
       toast.error(err.response?.data?.detail || 'Failed to approve proposal');
     }
-  }, [activeConvId, onModelCreated]);
+  }, [activeConvId, onModelCreated, onProposalApproved]);
 
   const dismissProposal = useCallback(async (
     messageId: number, proposalId: string
@@ -344,13 +370,14 @@ export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreate
 
       const parts: string[] = [];
       if (created_models?.length) parts.push(`${created_models.length} model${created_models.length !== 1 ? 's' : ''} created`);
-      parts.push(`${created_threats} threat${created_threats !== 1 ? 's' : ''}`);
-      parts.push(`${created_mitigations} mitigation${created_mitigations !== 1 ? 's' : ''} added`);
-      toast.success(`Approved all — ${parts.join(', ')}`);
+      if (created_threats > 0) parts.push(`${created_threats} threat${created_threats !== 1 ? 's' : ''} added`);
+      if (created_mitigations > 0) parts.push(`${created_mitigations} mitigation${created_mitigations !== 1 ? 's' : ''} added`);
+      toast.success(parts.length ? `All approved — ${parts.join(', ')}` : 'All proposals approved');
+      onProposalApproved?.();
     } catch (err: any) {
       toast.error(err.response?.data?.detail || 'Failed to approve all proposals');
     }
-  }, [activeConvId, onModelCreated]);
+  }, [activeConvId, onModelCreated, onProposalApproved]);
 
   // Pending model-creation proposals (shown separately — must be approved before threats)
   const pendingModelCount = messages.reduce(
@@ -380,6 +407,7 @@ export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreate
     activeConvId,
     messages,
     streamingContent,
+    thinkingStep,
     isStreaming,
     isLoading,
     pendingCount,

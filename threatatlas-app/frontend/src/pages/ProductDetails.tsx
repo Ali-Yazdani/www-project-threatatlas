@@ -42,6 +42,7 @@ import {
   Package,
   Activity,
   BarChart3,
+  Upload,
 } from 'lucide-react';
 import {
   DropdownMenu,
@@ -55,6 +56,7 @@ import { Empty, EmptyHeader, EmptyMedia, EmptyTitle, EmptyDescription } from '@/
 import { cn } from '@/lib/utils';
 import ThreatDetailsSheet from '@/components/ThreatDetailsSheet';
 import ThreatCard from '@/components/ThreatCard';
+import { ImportDrawioButton } from '@/components/ImportDrawioButton';
 
 interface Product {
   id: number;
@@ -584,6 +586,8 @@ export default function ProductDetails() {
 
   // New Diagram dialog state
   const [newDiagramOpen, setNewDiagramOpen] = useState(false);
+  const [newDiagramMode, setNewDiagramMode] = useState<'choose' | 'blank'>('choose');
+  const [importDialogOpen, setImportDialogOpen] = useState(false);
   const [newDiagramStep, setNewDiagramStep] = useState(1);
   const [newDiagramName, setNewDiagramName] = useState('New Diagram');
   const [newDiagramNameError, setNewDiagramNameError] = useState('');
@@ -713,6 +717,7 @@ export default function ProductDetails() {
   };
 
   const openNewDiagramDialog = () => {
+    setNewDiagramMode('choose');
     setNewDiagramStep(1);
     setNewDiagramName('New Diagram');
     setNewDiagramNameError('');
@@ -1226,122 +1231,181 @@ export default function ProductDetails() {
         onMitigationsChange={loadProductData}
       />
 
-      {/* New Diagram Dialog (2-step) */}
+      {/* New Diagram Dialog */}
       <Dialog open={newDiagramOpen} onOpenChange={setNewDiagramOpen}>
         <DialogContent className="sm:max-w-[480px]">
-          {/* Step indicator */}
-          <div className="flex items-center gap-1 mb-1">
-            {['Diagram', 'Framework'].map((label, i) => {
-              const num = i + 1;
-              const done = newDiagramStep > num;
-              const current = newDiagramStep === num;
-              return (
-                <div key={label} className="flex items-center gap-1">
-                  <div className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold transition-colors ${done ? 'bg-primary text-primary-foreground'
-                      : current ? 'border border-primary bg-primary/10 text-primary'
-                        : 'bg-muted text-muted-foreground'
-                    }`}>
-                    {done ? <Check className="h-3 w-3" /> : num}
+
+          {/* ── Choose mode ── */}
+          {newDiagramMode === 'choose' && (
+            <>
+              <DialogHeader>
+                <DialogTitle>New Diagram</DialogTitle>
+                <DialogDescription>Start with a blank canvas or import an existing Draw.io file.</DialogDescription>
+              </DialogHeader>
+
+              <div className="grid grid-cols-2 gap-3 py-2">
+                <button
+                  onClick={() => setNewDiagramMode('blank')}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-6 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                    <Grid3x3 className="h-6 w-6 text-primary" />
                   </div>
-                  <span className={`text-xs font-medium ${current ? 'text-foreground' : 'text-muted-foreground'}`}>
-                    {label}
-                  </span>
-                  {i < 1 && (
-                    <div className={`mx-1 h-px w-6 transition-colors ${newDiagramStep > num ? 'bg-primary' : 'bg-border'}`} />
-                  )}
-                </div>
-              );
-            })}
-          </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Blank Canvas</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">Start from scratch</p>
+                  </div>
+                </button>
 
-          <DialogHeader>
-            <DialogTitle>
-              {newDiagramStep === 1 ? 'New Diagram' : 'Select Frameworks'}
-            </DialogTitle>
-            <DialogDescription>
-              {newDiagramStep === 1
-                ? 'Give your diagram a name.'
-                : 'Choose the threat modeling frameworks to apply.'}
-            </DialogDescription>
-          </DialogHeader>
-
-          <div className="py-2 min-h-[140px]">
-            {newDiagramStep === 1 && (
-              <div className="space-y-1.5">
-                <Label htmlFor="nd-name">Diagram name <span className="text-destructive">*</span></Label>
-                <Input
-                  id="nd-name"
-                  value={newDiagramName}
-                  onChange={e => { setNewDiagramName(e.target.value); setNewDiagramNameError(''); }}
-                  onKeyDown={e => e.key === 'Enter' && handleNewDiagramNext()}
-                  autoFocus
-                />
-                {newDiagramNameError && <p className="text-xs text-destructive">{newDiagramNameError}</p>}
+                <button
+                  onClick={() => { setNewDiagramOpen(false); setImportDialogOpen(true); }}
+                  className="flex flex-col items-center gap-3 rounded-xl border-2 border-border/60 bg-muted/30 p-6 hover:border-primary/50 hover:bg-primary/5 transition-all duration-150 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary/40"
+                >
+                  <div className="flex h-12 w-12 items-center justify-center rounded-full bg-primary/10">
+                    <Upload className="h-6 w-6 text-primary" />
+                  </div>
+                  <div>
+                    <p className="font-semibold text-sm text-center">Import Draw.io</p>
+                    <p className="text-xs text-muted-foreground text-center mt-0.5">.drawio or .xml file</p>
+                  </div>
+                </button>
               </div>
-            )}
 
-            {newDiagramStep === 2 && (
-              <div className="space-y-2">
-                <div className="grid gap-2">
-                  {frameworks.map((fw: any) => {
-                    const selected = newDiagramFrameworks.includes(fw.id);
-                    return (
-                      <div
-                        key={fw.id}
-                        onClick={() => toggleNewDiagramFramework(fw.id)}
-                        className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors select-none ${selected
-                            ? 'border-primary/50 bg-primary/5'
-                            : 'border-border hover:border-border/80 hover:bg-muted/40'
-                          }`}
-                      >
-                        <div className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${selected ? 'bg-primary border-primary' : 'border-muted-foreground/40 bg-background'
-                          }`}>
-                          {selected && <Check className="h-3 w-3 text-primary-foreground" />}
-                        </div>
-                        <div className="min-w-0">
-                          <p className="text-sm font-semibold leading-tight">{fw.name}</p>
-                          {fw.description && (
-                            <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{fw.description}</p>
-                          )}
-                        </div>
+              <DialogFooter>
+                <Button variant="outline" onClick={() => setNewDiagramOpen(false)}>Cancel</Button>
+              </DialogFooter>
+            </>
+          )}
+
+          {/* ── Blank mode: existing name + framework steps ── */}
+          {newDiagramMode === 'blank' && (
+            <>
+              {/* Step indicator */}
+              <div className="flex items-center gap-1 mb-1">
+                {['Diagram', 'Framework'].map((label, i) => {
+                  const num = i + 1;
+                  const done = newDiagramStep > num;
+                  const current = newDiagramStep === num;
+                  return (
+                    <div key={label} className="flex items-center gap-1">
+                      <div className={`flex h-5 w-5 shrink-0 items-center justify-center rounded-full text-[10px] font-bold transition-colors ${done ? 'bg-primary text-primary-foreground'
+                          : current ? 'border border-primary bg-primary/10 text-primary'
+                            : 'bg-muted text-muted-foreground'
+                        }`}>
+                        {done ? <Check className="h-3 w-3" /> : num}
                       </div>
-                    );
-                  })}
-                </div>
-                {newDiagramFrameworkError && (
-                  <p className="text-xs text-destructive">{newDiagramFrameworkError}</p>
+                      <span className={`text-xs font-medium ${current ? 'text-foreground' : 'text-muted-foreground'}`}>
+                        {label}
+                      </span>
+                      {i < 1 && (
+                        <div className={`mx-1 h-px w-6 transition-colors ${newDiagramStep > num ? 'bg-primary' : 'bg-border'}`} />
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+
+              <DialogHeader>
+                <DialogTitle>{newDiagramStep === 1 ? 'New Diagram' : 'Select Frameworks'}</DialogTitle>
+                <DialogDescription>
+                  {newDiagramStep === 1 ? 'Give your diagram a name.' : 'Choose the threat modeling frameworks to apply.'}
+                </DialogDescription>
+              </DialogHeader>
+
+              <div className="py-2 min-h-[140px]">
+                {newDiagramStep === 1 && (
+                  <div className="space-y-1.5">
+                    <Label htmlFor="nd-name">Diagram name <span className="text-destructive">*</span></Label>
+                    <Input
+                      id="nd-name"
+                      value={newDiagramName}
+                      onChange={e => { setNewDiagramName(e.target.value); setNewDiagramNameError(''); }}
+                      onKeyDown={e => e.key === 'Enter' && handleNewDiagramNext()}
+                      autoFocus
+                    />
+                    {newDiagramNameError && <p className="text-xs text-destructive">{newDiagramNameError}</p>}
+                  </div>
+                )}
+
+                {newDiagramStep === 2 && (
+                  <div className="space-y-2">
+                    <div className="grid gap-2">
+                      {frameworks.map((fw: any) => {
+                        const selected = newDiagramFrameworks.includes(fw.id);
+                        return (
+                          <div
+                            key={fw.id}
+                            onClick={() => toggleNewDiagramFramework(fw.id)}
+                            className={`flex items-start gap-3 p-3 rounded-lg border cursor-pointer transition-colors select-none ${selected
+                                ? 'border-primary/50 bg-primary/5'
+                                : 'border-border hover:border-border/80 hover:bg-muted/40'
+                              }`}
+                          >
+                            <div className={`mt-0.5 flex h-4 w-4 shrink-0 items-center justify-center rounded border transition-colors ${selected ? 'bg-primary border-primary' : 'border-muted-foreground/40 bg-background'
+                              }`}>
+                              {selected && <Check className="h-3 w-3 text-primary-foreground" />}
+                            </div>
+                            <div className="min-w-0">
+                              <p className="text-sm font-semibold leading-tight">{fw.name}</p>
+                              {fw.description && (
+                                <p className="text-xs text-muted-foreground mt-0.5 line-clamp-2">{fw.description}</p>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                    {newDiagramFrameworkError && (
+                      <p className="text-xs text-destructive">{newDiagramFrameworkError}</p>
+                    )}
+                  </div>
                 )}
               </div>
-            )}
-          </div>
 
-          <DialogFooter className="flex-row items-center gap-2">
-            <Button variant="ghost" onClick={() => setNewDiagramOpen(false)} disabled={newDiagramSubmitting} className="mr-auto">
-              Cancel
-            </Button>
-            {newDiagramStep === 2 && (
-              <Button variant="outline" onClick={() => setNewDiagramStep(1)} disabled={newDiagramSubmitting}>
-                <ArrowLeft className="mr-1.5 h-4 w-4" />
-                Back
-              </Button>
-            )}
-            {newDiagramStep === 1 ? (
-              <Button onClick={handleNewDiagramNext}>
-                Next
-                <ArrowRight className="ml-1.5 h-4 w-4" />
-              </Button>
-            ) : (
-              <Button onClick={handleNewDiagramSubmit} disabled={newDiagramSubmitting}>
-                {newDiagramSubmitting ? (
-                  <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Creating…</>
+              <DialogFooter className="flex-row items-center gap-2">
+                <Button variant="ghost" onClick={() => setNewDiagramOpen(false)} disabled={newDiagramSubmitting} className="mr-auto">
+                  Cancel
+                </Button>
+                <Button
+                  variant="outline"
+                  onClick={() => newDiagramStep === 1 ? setNewDiagramMode('choose') : setNewDiagramStep(1)}
+                  disabled={newDiagramSubmitting}
+                >
+                  <ArrowLeft className="mr-1.5 h-4 w-4" />
+                  Back
+                </Button>
+                {newDiagramStep === 1 ? (
+                  <Button onClick={handleNewDiagramNext}>
+                    Next
+                    <ArrowRight className="ml-1.5 h-4 w-4" />
+                  </Button>
                 ) : (
-                  <>Create &amp; Open<ArrowRight className="ml-1.5 h-4 w-4" /></>
+                  <Button onClick={handleNewDiagramSubmit} disabled={newDiagramSubmitting}>
+                    {newDiagramSubmitting ? (
+                      <><Loader2 className="mr-1.5 h-4 w-4 animate-spin" />Creating…</>
+                    ) : (
+                      <>Create &amp; Open<ArrowRight className="ml-1.5 h-4 w-4" /></>
+                    )}
+                  </Button>
                 )}
-              </Button>
-            )}
-          </DialogFooter>
+              </DialogFooter>
+            </>
+          )}
         </DialogContent>
       </Dialog>
+
+      {/* Controlled ImportDrawioButton (opened from New Diagram wizard) */}
+      {productId && (
+        <ImportDrawioButton
+          productId={parseInt(productId)}
+          onImportSuccess={(diagramId) => {
+            loadProductData();
+            navigate(`/diagrams?product=${productId}&diagram=${diagramId}`);
+          }}
+          open={importDialogOpen}
+          onOpenChange={setImportDialogOpen}
+        />
+      )}
     </div>
   );
 }
