@@ -1,4 +1,4 @@
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -45,15 +45,27 @@ from app.routers import analytics
 from app.routers import attack
 from app.routers import approvals
 from app.routers import notifications
+from app.routers import mcp_oauth_ui
 from app.routers.scim import ScimError
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    """Startup: seed knowledge base.  Shutdown: nothing to clean up."""
+    """Startup: seed knowledge base, start the MCP session manager.
+
+    FastMCP's streamable_http_app() wires session_manager.run() into its own
+    Starlette sub-app's lifespan, but Starlette does not propagate lifespan
+    events into Mount()-ed sub-apps — so it's entered here instead, on the
+    root app's lifespan, or every /mcp request fails with "Task group is not
+    initialized."
+    """
+    from app.mcp.server import mcp
     from app.seed import seed_knowledge_base
+
     seed_knowledge_base()
-    yield
+    async with AsyncExitStack() as stack:
+        await stack.enter_async_context(mcp.session_manager.run())
+        yield
 
 
 app = FastAPI(
@@ -121,6 +133,10 @@ app.include_router(notifications.router, prefix="/api")
 app.include_router(collaboration.router)
 # SCIM endpoints are mounted at /scim/v2 (not /api) per RFC 7644 convention.
 app.include_router(scim.router)
+# Browser login/consent page for the /mcp OAuth flow — no prefix, paths are
+# /oauth/login and /oauth/consent. Must be registered before the root MCP
+# mount below so these routes match first.
+app.include_router(mcp_oauth_ui.router)
 
 
 @app.exception_handler(ScimError)
@@ -146,3 +162,17 @@ def root():
 def health_check():
     """Health check endpoint."""
     return {"status": "healthy"}
+
+
+# MCP server for AI coding tools (Claude Code, Claude.ai, etc.) — OAuth 2.1 +
+# static ta_/JWT bearer tokens, both handled by ThreatAtlasOAuthProvider.
+# FastMCP's streamable_http_app() returns a Starlette app whose routes
+# include /mcp itself plus the OAuth routes (/authorize, /token, /register,
+# /revoke, /.well-known/oauth-authorization-server,
+# /.well-known/oauth-protected-resource/mcp) as siblings — RFC 8414/9728
+# discovery expects those at the domain root, not under an "/mcp" prefix.
+# Mounting at "/" as the LAST route means every route above (all /api/...,
+# /, /health, /oauth/..., /scim/...) still matches first; only paths none of
+# them own fall through to this sub-app.
+from app.mcp.server import mcp_asgi_app  # noqa: E402
+app.mount("/", mcp_asgi_app)

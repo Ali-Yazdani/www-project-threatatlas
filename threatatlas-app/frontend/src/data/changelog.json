@@ -1,5 +1,48 @@
 [
   {
+    "version": "0.8.0",
+    "date": "2026-07-19",
+    "tag": "feature",
+    "entries": [
+      {
+        "type": "added",
+        "text": "MCP server for AI coding assistants: connect Claude Code, Claude.ai, Claude Desktop, and other MCP clients directly to ThreatAtlas. Includes OAuth 2.1 browser login/consent flow, 30+ tools spanning products, diagrams, frameworks, threats, mitigations, component templates, and risk assessment. All tool calls run through the same routers, RBAC checks, and audit logging as the REST API."
+      },
+      {
+        "type": "added",
+        "text": "MCP server documentation: docs/mcp.md covers endpoint configuration, authentication (OAuth 2.1 and personal API tokens), available tools, and self-hosting requirements including BACKEND_BASE_URL."
+      },
+      {
+        "type": "added",
+        "text": "AI provider TLS support: new AI_CA_BUNDLE_PATH environment variable for corporate proxy environments with internal CAs."
+      },
+      {
+        "type": "improved",
+        "text": "Router trailing slash normalization: removed trailing slashes from route paths across ai_conversations, notifications, search, and approvals routers for consistency."
+      },
+      {
+        "type": "improved",
+        "text": "Auth refactor: extracted resolve_user_from_bearer with proper ExpiredApiToken exception handling for clearer expired token error messages."
+      },
+      {
+        "type": "improved",
+        "text": "AI service tool schema fallback: gracefully handles providers that reject tool-calling schemas (Azure OpenAI, LiteLLM gateways) by retrying without tools."
+      },
+      {
+        "type": "fixed",
+        "text": "Frontend trailing slash interceptor: removed automatic trailing slash addition from API requests to prevent double-slash issues."
+      },
+      {
+        "type": "improved",
+        "text": "Container startup: backend now runs pending Alembic migrations before starting the server to prevent schema drift."
+      },
+      {
+        "type": "improved",
+        "text": "Default ports changed in docker-compose: Redis 6379→6380, Backend 8000→8001, Frontend 3000→3001 to avoid conflicts with common local services."
+      }
+    ]
+  },
+  {
     "version": "0.7.0",
     "date": "2026-05-22",
     "tag": "feature",

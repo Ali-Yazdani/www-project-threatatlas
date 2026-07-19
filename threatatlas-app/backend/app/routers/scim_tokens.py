@@ -13,7 +13,7 @@ from app.auth.scim_auth import generate_token, hash_token
 router = APIRouter(prefix="/scim-tokens", tags=["scim"])
 
 
-@router.get("/", response_model=list[ScimTokenRead])
+@router.get("", response_model=list[ScimTokenRead])
 def list_tokens(
     current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -22,7 +22,7 @@ def list_tokens(
     return db.query(ScimToken).order_by(ScimToken.created_at.desc()).all()
 
 
-@router.post("/", response_model=ScimTokenCreated, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ScimTokenCreated, status_code=status.HTTP_201_CREATED)
 def create_token(
     payload: ScimTokenCreate,
     current_user: UserModel = Depends(get_current_user),

@@ -37,6 +37,17 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return ("429" in text) or ("rate limit" in text) or ("rate_limit_exceeded" in text)
 
 
+_TOOL_SCHEMA_ERROR_RE = re.compile(
+    r"tools\[\d+\]\.function\.parameters|invalid schema for function", re.IGNORECASE
+)
+
+
+def _is_tool_schema_error(exc: Exception) -> bool:
+    """Detect a provider rejecting our tool-calling schemas (e.g. Azure OpenAI /
+    LiteLLM gateways enforcing stricter JSON-schema validation than OpenAI itself)."""
+    return bool(_TOOL_SCHEMA_ERROR_RE.search(str(exc)))
+
+
 def get_active_config(db: Session) -> AIConfig | None:
     return db.query(AIConfig).filter(AIConfig.is_active == True).first()
 
@@ -131,6 +142,8 @@ async def stream_chat(
 
     max_attempts = 3
     last_exc: Exception | None = None
+    tools_fallback_used = False
+    tools_disabled = False
 
     for attempt in range(1, max_attempts + 1):
         all_chunks.clear()
@@ -203,11 +216,27 @@ async def stream_chat(
                 )
                 await asyncio.sleep(wait_seconds)
                 continue
+            if _is_tool_schema_error(exc) and not tools_fallback_used and not all_chunks:
+                tools_fallback_used = True
+                tools_disabled = True
+                agent = build_agent(config, enable_tools=False)
+                logger.warning(
+                    "Provider %s rejected tool schemas (attempt %s/%s); retrying without tools",
+                    config.provider, attempt, max_attempts,
+                )
+                continue
             break
 
         result = run_state["result"]
         full_text = result.output or ""
         proposals = deps.proposals
+
+        if tools_disabled:
+            full_text = (
+                "_Note: this AI provider doesn't support ThreatAtlas's tool-based analysis "
+                "(Azure/LiteLLM gateways sometimes reject tool schemas), so this reply is "
+                "conversational only. Ask your admin to check provider compatibility._\n\n"
+            ) + full_text
 
         # Simulate streaming — yield text in small chunks so the cursor animates
         _CHUNK = 80
@@ -682,9 +711,15 @@ async def classify_diagram_elements(
     response_text: str = ""
 
     try:
+        from app.ai.agent import _build_http_client
+        http_client = _build_http_client()
+
         if config.provider == "anthropic":
             from anthropic import AsyncAnthropic
-            client = AsyncAnthropic(api_key=api_key)
+            anthropic_kwargs: dict[str, Any] = {"api_key": api_key}
+            if http_client is not None:
+                anthropic_kwargs["http_client"] = http_client
+            client = AsyncAnthropic(**anthropic_kwargs)
             message = await client.messages.create(
                 model=config.model_name,
                 max_tokens=2048,
@@ -696,6 +731,8 @@ async def classify_diagram_elements(
             init_kwargs: dict[str, Any] = {"api_key": api_key}
             if config.base_url:
                 init_kwargs["base_url"] = config.base_url
+            if http_client is not None:
+                init_kwargs["http_client"] = http_client
             client = AsyncOpenAI(**init_kwargs)
             completion = await client.chat.completions.create(
                 model=config.model_name,

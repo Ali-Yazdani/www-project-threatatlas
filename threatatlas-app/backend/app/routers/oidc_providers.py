@@ -18,7 +18,7 @@ from app.auth.secrets import encrypt_secret
 router = APIRouter(prefix="/sso/providers", tags=["sso"])
 
 
-@router.get("/", response_model=list[OIDCProviderRead])
+@router.get("", response_model=list[OIDCProviderRead])
 def list_providers(
     current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -27,7 +27,7 @@ def list_providers(
     return db.query(OIDCProviderConfig).order_by(OIDCProviderConfig.id).all()
 
 
-@router.post("/", response_model=OIDCProviderRead, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=OIDCProviderRead, status_code=status.HTTP_201_CREATED)
 def create_provider(
     payload: OIDCProviderCreate,
     current_user: UserModel = Depends(get_current_user),

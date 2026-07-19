@@ -66,7 +66,6 @@ def _get_accepted_by_name(db: Session, diagram_threat_id: int) -> str:
     return "Unknown"
 
 
-@router.get("/my/")
 @router.get("/my")
 def list_my_approvals(
     current_user: UserModel = Depends(get_current_user),
@@ -94,7 +93,6 @@ def list_my_approvals(
     return result
 
 
-@router.get("/my/count/")
 @router.get("/my/count")
 def get_my_approvals_count(
     current_user: UserModel = Depends(get_current_user),

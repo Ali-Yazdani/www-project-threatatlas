@@ -58,7 +58,7 @@ def _assert_owner(conversation: AIConversation, user: UserModel) -> None:
 
 # ── Conversations ──────────────────────────────────────────────────────────
 
-@router.get("/", response_model=list[ConversationResponse])
+@router.get("", response_model=list[ConversationResponse])
 def list_conversations(
     diagram_id: int | None = Query(None),
     current_user: UserModel = Depends(get_current_user),
@@ -71,7 +71,7 @@ def list_conversations(
     return q.order_by(AIConversation.updated_at.desc()).all()
 
 
-@router.post("/", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ConversationResponse, status_code=status.HTTP_201_CREATED)
 def create_conversation(
     body: ConversationCreate,
     current_user: UserModel = Depends(get_current_user),

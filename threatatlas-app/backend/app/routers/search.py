@@ -20,7 +20,7 @@ from app.models.enums import UserRole
 router = APIRouter(prefix="/search", tags=["search"])
 
 
-@router.get("/")
+@router.get("")
 def global_search(
     q: str = Query(default="", min_length=0),
     limit: int = Query(default=20),

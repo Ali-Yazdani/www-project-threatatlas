@@ -19,7 +19,7 @@ def _create_product(db: Session, owner: User, name: str = "Test Product", is_pub
 
 def test_list_products_returns_own(client: TestClient, standard_user: User, user_headers: dict, db: Session):
     _create_product(db, standard_user, "My Product")
-    resp = client.get("/api/products/", headers=user_headers)
+    resp = client.get("/api/products", headers=user_headers)
     assert resp.status_code == 200
     names = [p["name"] for p in resp.json()]
     assert "My Product" in names
@@ -27,7 +27,7 @@ def test_list_products_returns_own(client: TestClient, standard_user: User, user
 
 def test_list_products_hides_others(client: TestClient, standard_user: User, other_user: User, user_headers: dict, db: Session):
     _create_product(db, other_user, "Secret Product")
-    resp = client.get("/api/products/", headers=user_headers)
+    resp = client.get("/api/products", headers=user_headers)
     assert resp.status_code == 200
     names = [p["name"] for p in resp.json()]
     assert "Secret Product" not in names
@@ -35,7 +35,7 @@ def test_list_products_hides_others(client: TestClient, standard_user: User, oth
 
 def test_list_products_admin_sees_all(client: TestClient, admin_user: User, standard_user: User, admin_headers: dict, db: Session):
     _create_product(db, standard_user, "User's Product")
-    resp = client.get("/api/products/", headers=admin_headers)
+    resp = client.get("/api/products", headers=admin_headers)
     assert resp.status_code == 200
     names = [p["name"] for p in resp.json()]
     assert "User's Product" in names
@@ -44,7 +44,7 @@ def test_list_products_admin_sees_all(client: TestClient, admin_user: User, stan
 def test_list_products_public_visible_to_all(client: TestClient, standard_user: User, other_user: User, db: Session):
     _create_product(db, other_user, "Public Product", is_public=True)
     headers = make_auth_headers(standard_user)
-    resp = client.get("/api/products/", headers=headers)
+    resp = client.get("/api/products", headers=headers)
     assert resp.status_code == 200
     names = [p["name"] for p in resp.json()]
     assert "Public Product" in names
@@ -53,13 +53,13 @@ def test_list_products_public_visible_to_all(client: TestClient, standard_user: 
 # ── Create product ─────────────────────────────────────────────────────────────
 
 def test_create_product(client: TestClient, user_headers: dict):
-    resp = client.post("/api/products/", json={"name": "New Product"}, headers=user_headers)
+    resp = client.post("/api/products", json={"name": "New Product"}, headers=user_headers)
     assert resp.status_code == 201
     assert resp.json()["name"] == "New Product"
 
 
 def test_create_product_unauthenticated(client: TestClient):
-    resp = client.post("/api/products/", json={"name": "Should Fail"})
+    resp = client.post("/api/products", json={"name": "Should Fail"})
     assert resp.status_code in (401, 403)
 
 

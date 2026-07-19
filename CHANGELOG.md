@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 Release notes are kept in sync with the in-app changelog (`threatatlas-app/frontend/src/data/changelog.json`).
 
+## [0.8.0] - 2026-07-19
+
+### Added
+
+- MCP server for AI coding assistants: connect Claude Code, Claude.ai, Claude Desktop, and other MCP clients directly to ThreatAtlas. Includes OAuth 2.1 browser login/consent flow, 30+ tools spanning products, diagrams, frameworks, threats, mitigations, component templates, and risk assessment. All tool calls run through the same routers, RBAC checks, and audit logging as the REST API.
+- MCP server documentation: docs/mcp.md covers endpoint configuration, authentication (OAuth 2.1 and personal API tokens), available tools, and self-hosting requirements including BACKEND_BASE_URL.
+- AI provider TLS support: new AI_CA_BUNDLE_PATH environment variable for corporate proxy environments with internal CAs.
+
+### Changed
+
+- Router trailing slash normalization: removed trailing slashes from route paths across ai_conversations, notifications, search, and approvals routers for consistency.
+- Auth refactor: extracted resolve_user_from_bearer with proper ExpiredApiToken exception handling for clearer expired token error messages.
+- AI service tool schema fallback: gracefully handles providers that reject tool-calling schemas (Azure OpenAI, LiteLLM gateways) by retrying without tools.
+- Container startup: backend now runs pending Alembic migrations before starting the server to prevent schema drift.
+- Default ports changed in docker-compose: Redis 6379→6380, Backend 8000→8001, Frontend 3000→3001 to avoid conflicts with common local services.
+
+### Fixed
+
+- Frontend trailing slash interceptor: removed automatic trailing slash addition from API requests to prevent double-slash issues.
+
 ## [0.7.0] - 2026-05-22
 
 ### Added

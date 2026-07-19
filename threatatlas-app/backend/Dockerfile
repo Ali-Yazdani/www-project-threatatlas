@@ -25,6 +25,8 @@ RUN pdm install --prod --no-lock --no-editable
 # Copy application code
 COPY . /app
 
+RUN chmod +x /app/entrypoint.sh
+
 # Expose port
 EXPOSE 8000
 
@@ -34,5 +36,6 @@ RUN useradd -m -u 1000 appuser && \
 
 USER appuser
 
-# Streamlined startup command
-CMD ["pdm", "run", "uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+# Run pending Alembic migrations before starting the server, so the schema
+# never drifts behind the code (see GitHub issue re: UndefinedColumn 500s).
+CMD ["/app/entrypoint.sh"]

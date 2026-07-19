@@ -445,7 +445,7 @@ function ComponentFormDialog({
 
   return (
     <Dialog open={open} onOpenChange={v => !v && onClose()}>
-      <DialogContent className="sm:max-w-4xl p-0 gap-0 max-h-[90vh] flex flex-col overflow-hidden">
+      <DialogContent className="max-w-6xl p-2 gap-0 max-h-[96vh] flex flex-col overflow-hidden">
 
         {/* Header */}
         <div className="flex items-center justify-between px-5 py-4 border-b border-border/50 shrink-0">

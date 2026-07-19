@@ -38,6 +38,16 @@ class Settings(BaseSettings):
     # Redis (optional — system works without it)
     redis_url: str = "redis://localhost:6379/0"
 
+    # MCP OAuth — absolute public origin of this backend, used as both the
+    # OAuth issuer and resource-server URL for the /mcp browser login flow.
+    # Must be set to the real public origin in production (same idea as
+    # frontend_url above).
+    backend_base_url: str = "http://localhost:8000"
+
+    # AI provider TLS — set when the provider (Azure OpenAI, LiteLLM, etc.) sits
+    # behind a corporate proxy signed by an internal CA not in the system trust store.
+    ai_ca_bundle_path: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         case_sensitive=False,

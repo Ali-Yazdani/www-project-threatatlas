@@ -20,6 +20,13 @@ from app.models.component_template_link import ComponentTemplateThreat, Componen
 from app.models.attack_technique_link import DiagramThreatAttackTechnique
 from app.models.enums import UserRole, CollaboratorRole
 from app.models.notification import Notification
+from app.models.mcp_oauth import (
+    McpOAuthClient,
+    McpPendingAuthorization,
+    McpAuthorizationCode,
+    McpAccessToken,
+    McpRefreshToken,
+)
 
 __all__ = [
     "User",
@@ -54,4 +61,9 @@ __all__ = [
     "AIConversation",
     "AIMessage",
     "Notification",
+    "McpOAuthClient",
+    "McpPendingAuthorization",
+    "McpAuthorizationCode",
+    "McpAccessToken",
+    "McpRefreshToken",
 ]

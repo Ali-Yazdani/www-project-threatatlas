@@ -13,7 +13,7 @@ from app.services.audit import log_event
 router = APIRouter(prefix="/diagrams", tags=["diagrams"])
 
 
-@router.get("/", response_model=list[Diagram])
+@router.get("", response_model=list[Diagram])
 def list_diagrams(
     current_user: UserModel = Depends(get_current_user),
     product_id: int | None = None,
@@ -86,7 +86,7 @@ def get_diagram(
     return diagram
 
 
-@router.post("/", response_model=Diagram, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=Diagram, status_code=status.HTTP_201_CREATED)
 def create_diagram(
     diagram: DiagramCreate,
     current_user: UserModel = Depends(get_current_user),

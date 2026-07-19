@@ -20,6 +20,55 @@ def _hash_token(raw: str) -> str:
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
 
 
+class ExpiredApiToken(Exception):
+    """Raised by resolve_user_from_bearer when a ta_ API token has expired."""
+
+
+def resolve_user_from_bearer(raw: str, db: Session) -> User | None:
+    """
+    Resolve a User from a raw bearer token (JWT or long-lived ta_ API token).
+
+    Returns None if the token is missing/invalid/inactive-user. Raises
+    ExpiredApiToken if it's a recognized but expired ta_ token, so callers can
+    surface a more specific message than the generic "invalid credentials".
+    """
+    # ── Try JWT first ──────────────────────────────────────────────────────
+    try:
+        payload = decode_access_token(raw)
+        user_id = payload.get("sub")
+        if user_id is None:
+            return None
+        user_id = int(user_id)
+        user = db.query(User).filter(User.id == user_id).first()
+        if user is None or not user.is_active:
+            return None
+        return user
+    except (JWTError, ValueError):
+        pass
+
+    # ── Fall back to API token (ta_ prefix) ────────────────────────────────
+    if raw.startswith("ta_"):
+        from app.models.api_token import ApiToken
+        token_row = db.query(ApiToken).filter(ApiToken.token_hash == _hash_token(raw)).first()
+        if token_row is None:
+            return None
+        # Honour expiry
+        if token_row.expires_at and token_row.expires_at < datetime.now(timezone.utc):
+            raise ExpiredApiToken()
+        user = db.query(User).filter(User.id == token_row.user_id).first()
+        if user is None or not user.is_active:
+            return None
+        # Stamp last use (best-effort, don't fail the request on error)
+        try:
+            token_row.last_used_at = datetime.now(timezone.utc)
+            db.commit()
+        except Exception:
+            db.rollback()
+        return user
+
+    return None
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     db: Session = Depends(get_db)
@@ -31,47 +80,18 @@ async def get_current_user(
         headers={"WWW-Authenticate": "Bearer"},
     )
 
-    raw = credentials.credentials
-
-    # ── Try JWT first ──────────────────────────────────────────────────────
     try:
-        payload = decode_access_token(raw)
-        user_id = payload.get("sub")
-        if user_id is None:
-            raise credentials_exception
-        user_id = int(user_id)
-        user = db.query(User).filter(User.id == user_id).first()
-        if user is None or not user.is_active:
-            raise credentials_exception
-        return user
-    except (JWTError, ValueError):
-        pass
+        user = resolve_user_from_bearer(credentials.credentials, db)
+    except ExpiredApiToken:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="API token has expired",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
 
-    # ── Fall back to API token (ta_ prefix) ────────────────────────────────
-    if raw.startswith("ta_"):
-        from app.models.api_token import ApiToken
-        token_row = db.query(ApiToken).filter(ApiToken.token_hash == _hash_token(raw)).first()
-        if token_row is None:
-            raise credentials_exception
-        # Honour expiry
-        if token_row.expires_at and token_row.expires_at < datetime.now(timezone.utc):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED,
-                detail="API token has expired",
-                headers={"WWW-Authenticate": "Bearer"},
-            )
-        user = db.query(User).filter(User.id == token_row.user_id).first()
-        if user is None or not user.is_active:
-            raise credentials_exception
-        # Stamp last use (best-effort, don't fail the request on error)
-        try:
-            token_row.last_used_at = datetime.now(timezone.utc)
-            db.commit()
-        except Exception:
-            db.rollback()
-        return user
-
-    raise credentials_exception
+    if user is None:
+        raise credentials_exception
+    return user
 
 
 async def get_current_active_user(

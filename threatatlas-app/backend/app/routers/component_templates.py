@@ -172,7 +172,7 @@ def _get_kb_mitigations(db: Session, component_id: int, framework_id: int | None
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
 
-@router.get("/", response_model=list[ComponentTemplateGrouped])
+@router.get("", response_model=list[ComponentTemplateGrouped])
 def list_component_templates(
     framework_id: int | None = Query(default=None),
     current_user: UserModel = Depends(get_current_user),
@@ -240,7 +240,7 @@ def get_component_template(
     )
 
 
-@router.post("/", response_model=ComponentTemplateDetail, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ComponentTemplateDetail, status_code=status.HTTP_201_CREATED)
 def create_component_template(
     payload: ComponentTemplateCreate,
     current_user: UserModel = Depends(get_current_user),

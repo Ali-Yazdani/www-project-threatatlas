@@ -20,7 +20,7 @@ def _sha256(raw: str) -> str:
 
 def test_create_api_token(client: TestClient, user_headers: dict):
     resp = client.post(
-        "/api/api-tokens/",
+        "/api/api-tokens",
         json={"name": "CI token"},
         headers=user_headers,
     )
@@ -32,11 +32,11 @@ def test_create_api_token(client: TestClient, user_headers: dict):
 
 def test_create_token_only_reveals_raw_once(client: TestClient, user_headers: dict):
     """The raw token must only appear in the creation response."""
-    r1 = client.post("/api/api-tokens/", json={"name": "secret"}, headers=user_headers)
+    r1 = client.post("/api/api-tokens", json={"name": "secret"}, headers=user_headers)
     assert r1.status_code == 201
     raw_token = r1.json()["token"]
 
-    r2 = client.get("/api/api-tokens/", headers=user_headers)
+    r2 = client.get("/api/api-tokens", headers=user_headers)
     assert r2.status_code == 200
     listed = r2.json()
     assert all(t.get("token") != raw_token for t in listed), "Raw token must not appear in list response"
@@ -44,10 +44,10 @@ def test_create_token_only_reveals_raw_once(client: TestClient, user_headers: di
 
 def test_list_tokens_belongs_to_owner(client: TestClient, standard_user: User, other_user: User, db: Session, user_headers: dict):
     other_headers = make_auth_headers(other_user)
-    client.post("/api/api-tokens/", json={"name": "mine"}, headers=user_headers)
-    client.post("/api/api-tokens/", json={"name": "theirs"}, headers=other_headers)
+    client.post("/api/api-tokens", json={"name": "mine"}, headers=user_headers)
+    client.post("/api/api-tokens", json={"name": "theirs"}, headers=other_headers)
 
-    resp = client.get("/api/api-tokens/", headers=user_headers)
+    resp = client.get("/api/api-tokens", headers=user_headers)
     assert resp.status_code == 200
     names = [t["name"] for t in resp.json()]
     assert "mine" in names
@@ -55,19 +55,19 @@ def test_list_tokens_belongs_to_owner(client: TestClient, standard_user: User, o
 
 
 def test_delete_api_token(client: TestClient, user_headers: dict):
-    create = client.post("/api/api-tokens/", json={"name": "temp"}, headers=user_headers)
+    create = client.post("/api/api-tokens", json={"name": "temp"}, headers=user_headers)
     token_id = create.json()["id"]
 
     resp = client.delete(f"/api/api-tokens/{token_id}", headers=user_headers)
     assert resp.status_code == 204
 
-    list_resp = client.get("/api/api-tokens/", headers=user_headers)
+    list_resp = client.get("/api/api-tokens", headers=user_headers)
     assert all(t["id"] != token_id for t in list_resp.json())
 
 
 def test_delete_other_users_token_forbidden(client: TestClient, standard_user: User, other_user: User, user_headers: dict, db: Session):
     other_headers = make_auth_headers(other_user)
-    create = client.post("/api/api-tokens/", json={"name": "theirs"}, headers=other_headers)
+    create = client.post("/api/api-tokens", json={"name": "theirs"}, headers=other_headers)
     token_id = create.json()["id"]
 
     resp = client.delete(f"/api/api-tokens/{token_id}", headers=user_headers)
@@ -77,7 +77,7 @@ def test_delete_other_users_token_forbidden(client: TestClient, standard_user: U
 # ── Authentication via ta_ token ───────────────────────────────────────────────
 
 def test_authenticate_with_api_token(client: TestClient, standard_user: User, user_headers: dict):
-    create = client.post("/api/api-tokens/", json={"name": "auth-test"}, headers=user_headers)
+    create = client.post("/api/api-tokens", json={"name": "auth-test"}, headers=user_headers)
     raw_token = create.json()["token"]
 
     resp = client.get("/api/auth/me", headers={"Authorization": f"Bearer {raw_token}"})
@@ -86,7 +86,7 @@ def test_authenticate_with_api_token(client: TestClient, standard_user: User, us
 
 
 def test_expired_api_token_rejected(client: TestClient, standard_user: User, db: Session, user_headers: dict):
-    create = client.post("/api/api-tokens/", json={"name": "expiring"}, headers=user_headers)
+    create = client.post("/api/api-tokens", json={"name": "expiring"}, headers=user_headers)
     token_id = create.json()["id"]
     raw_token = create.json()["token"]
 

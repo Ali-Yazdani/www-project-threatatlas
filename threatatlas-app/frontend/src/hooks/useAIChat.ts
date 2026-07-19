@@ -165,7 +165,7 @@ export function useAIChat({ diagramId, activeModelId, frameworkId, onModelCreate
 
     try {
       const response = await fetch(
-        `${API_BASE_URL}/api/ai-conversations/${convId}/messages/?${params}`,
+        `${API_BASE_URL}/api/ai-conversations/${convId}/messages?${params}`,
         {
           method: 'POST',
           headers: {

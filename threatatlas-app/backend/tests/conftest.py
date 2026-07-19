@@ -103,8 +103,19 @@ def db(engine) -> Session:
 
 # ── TestClient with get_db override and mocked lifespan seed ──────────────────
 
+@pytest.fixture(scope="session")
+def _test_client(engine) -> TestClient:
+    """The app's lifespan (and the MCP StreamableHTTPSessionManager it starts)
+    may only be entered once per process — mirrors a real server, which runs
+    a single lifespan cycle for its whole life — so the TestClient context is
+    session-scoped; per-test isolation comes from swapping get_db below."""
+    with patch("app.seed.seed_knowledge_base"):
+        with TestClient(app, raise_server_exceptions=True) as c:
+            yield c
+
+
 @pytest.fixture()
-def client(db) -> TestClient:
+def client(db, _test_client: TestClient) -> TestClient:
     """FastAPI TestClient wired to the test DB session."""
     def override_get_db():
         try:
@@ -113,13 +124,7 @@ def client(db) -> TestClient:
             pass
 
     app.dependency_overrides[get_db] = override_get_db
-
-    # The app lifespan calls seed_knowledge_base() which opens its own
-    # SessionLocal against the real DB — mock it out in tests.
-    with patch("app.seed.seed_knowledge_base"):
-        with TestClient(app, raise_server_exceptions=True) as c:
-            yield c
-
+    yield _test_client
     app.dependency_overrides.clear()
 
 

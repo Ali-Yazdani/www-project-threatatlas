@@ -28,7 +28,7 @@ def _to_response(cfg: AIConfigModel) -> AIConfigResponse:
     )
 
 
-@router.get("/", response_model=AIConfigResponse | None)
+@router.get("", response_model=AIConfigResponse | None)
 def get_config(
     current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -41,7 +41,7 @@ def get_config(
     return _to_response(cfg)
 
 
-@router.post("/", response_model=AIConfigResponse, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=AIConfigResponse, status_code=status.HTTP_201_CREATED)
 def create_config(
     body: AIConfigCreate,
     current_user: UserModel = Depends(get_current_user),
@@ -132,7 +132,10 @@ async def test_config(
         from dataclasses import field as dc_field
         import dataclasses
 
-        agent = build_agent(temp_cfg)
+        # enable_tools=False: this call should validate connectivity, credentials,
+        # and model availability only — not tool-calling schema compatibility
+        # (Azure OpenAI / LiteLLM gateways may reject the tool schemas; see #25).
+        agent = build_agent(temp_cfg, enable_tools=False)
 
         # Minimal test: ask the agent a single conversational question with no DB deps
         # We use a stub deps object that has no DB so no tools will be called

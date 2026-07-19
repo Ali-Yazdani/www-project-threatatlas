@@ -52,7 +52,7 @@ class ApiTokenCreated(ApiTokenRead):
 
 # ── Routes ────────────────────────────────────────────────────────────────────
 
-@router.get("/", response_model=list[ApiTokenRead])
+@router.get("", response_model=list[ApiTokenRead])
 def list_tokens(
     current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -65,7 +65,7 @@ def list_tokens(
     )
 
 
-@router.post("/", response_model=ApiTokenCreated, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=ApiTokenCreated, status_code=status.HTTP_201_CREATED)
 def create_token(
     payload: ApiTokenCreate,
     current_user: UserModel = Depends(get_current_user),

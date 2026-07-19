@@ -21,6 +21,7 @@ For detailed guides, please refer to:
 - **[Development Guide](docs/development.md)**: How to set up a local development environment and contribute code.
 - **[User Guide](docs/user-guide.md)**: How to use the Web UI to manage products, diagrams, and threats.
 - **[CI/CD Integration](docs/ci-integration.md)**: Gate your pipelines on a product's threat-model posture (GitHub Actions / GitLab CI).
+- **[MCP Server](docs/mcp.md)**: Connect Claude Code, Claude.ai, and other MCP clients directly to your threat models.
 
 ---
 

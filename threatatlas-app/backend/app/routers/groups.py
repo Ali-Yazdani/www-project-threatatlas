@@ -19,7 +19,7 @@ from app.auth.permissions import require_admin
 router = APIRouter(prefix="/groups", tags=["groups"])
 
 
-@router.get("/", response_model=list[GroupRead])
+@router.get("", response_model=list[GroupRead])
 def list_groups(
     current_user: UserModel = Depends(get_current_user),
     db: Session = Depends(get_db),
@@ -28,7 +28,7 @@ def list_groups(
     return db.query(Group).order_by(Group.name).all()
 
 
-@router.post("/", response_model=GroupDetail, status_code=status.HTTP_201_CREATED)
+@router.post("", response_model=GroupDetail, status_code=status.HTTP_201_CREATED)
 def create_group(
     payload: GroupCreate,
     current_user: UserModel = Depends(get_current_user),

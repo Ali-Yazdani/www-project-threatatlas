@@ -26,7 +26,6 @@ class NotificationOut(BaseModel):
     model_config = {"from_attributes": True}
 
 
-@router.get("/", response_model=list[NotificationOut])
 @router.get("", response_model=list[NotificationOut])
 def list_notifications(
     current_user: UserModel = Depends(get_current_user),
@@ -43,7 +42,6 @@ def list_notifications(
     return notifications
 
 
-@router.get("/unread-count/")
 @router.get("/unread-count")
 def unread_count(
     current_user: UserModel = Depends(get_current_user),

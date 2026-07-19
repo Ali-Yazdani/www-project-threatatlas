@@ -176,10 +176,25 @@ class AgentDeps:
     pending_model_proposal_id: str | None = field(default=None)
 
 
+def _build_http_client():
+    """Build an httpx.AsyncClient trusting a custom CA bundle, if configured.
+
+    Corporate deployments (Azure OpenAI / LiteLLM behind an internal proxy) may sit
+    behind TLS signed by a CA not in the system trust store; see GitHub #26.
+    Returns None when AI_CA_BUNDLE_PATH isn't set, so callers skip the kwarg entirely.
+    """
+    from app.config import settings
+    if not settings.ai_ca_bundle_path:
+        return None
+    import httpx
+    return httpx.AsyncClient(verify=settings.ai_ca_bundle_path)
+
+
 def _make_openai_model(OpenAIModel, model_name: str, api_key: str, base_url: str | None = None):
     """Create OpenAIModel handling all known pydantic-ai API versions via introspection."""
     import inspect, os
     params = set(inspect.signature(OpenAIModel.__init__).parameters.keys())
+    http_client = _build_http_client()
 
     # pydantic-ai 0.0.20–0.0.x: openai_client kwarg
     if "openai_client" in params:
@@ -187,6 +202,8 @@ def _make_openai_model(OpenAIModel, model_name: str, api_key: str, base_url: str
         client_kw: dict[str, Any] = {"api_key": api_key}
         if base_url:
             client_kw["base_url"] = base_url
+        if http_client is not None:
+            client_kw["http_client"] = http_client
         return OpenAIModel(model_name, openai_client=AsyncOpenAI(**client_kw))
 
     # pydantic-ai 0.1+: provider kwarg
@@ -196,6 +213,8 @@ def _make_openai_model(OpenAIModel, model_name: str, api_key: str, base_url: str
             prov_kw: dict[str, Any] = {"api_key": api_key}
             if base_url:
                 prov_kw["base_url"] = base_url
+            if http_client is not None:
+                prov_kw["http_client"] = http_client
             return OpenAIModel(model_name, provider=OpenAIProvider(**prov_kw))
         except (ImportError, TypeError):
             pass
@@ -219,15 +238,22 @@ def _make_anthropic_model(AnthropicModel, model_name: str, api_key: str):
     """Create AnthropicModel handling all known pydantic-ai API versions via introspection."""
     import inspect, os
     params = set(inspect.signature(AnthropicModel.__init__).parameters.keys())
+    http_client = _build_http_client()
 
     if "anthropic_client" in params:
         from anthropic import AsyncAnthropic
-        return AnthropicModel(model_name, anthropic_client=AsyncAnthropic(api_key=api_key))
+        client_kw: dict[str, Any] = {"api_key": api_key}
+        if http_client is not None:
+            client_kw["http_client"] = http_client
+        return AnthropicModel(model_name, anthropic_client=AsyncAnthropic(**client_kw))
 
     if "provider" in params:
         try:
             from pydantic_ai.providers.anthropic import AnthropicProvider
-            return AnthropicModel(model_name, provider=AnthropicProvider(api_key=api_key))
+            prov_kw: dict[str, Any] = {"api_key": api_key}
+            if http_client is not None:
+                prov_kw["http_client"] = http_client
+            return AnthropicModel(model_name, provider=AnthropicProvider(**prov_kw))
         except (ImportError, TypeError):
             pass
 
@@ -238,8 +264,14 @@ def _make_anthropic_model(AnthropicModel, model_name: str, api_key: str):
     return AnthropicModel(model_name)
 
 
-def build_agent(config: AIConfig):
-    """Construct a pydantic-ai Agent for the given AI configuration."""
+def build_agent(config: AIConfig, enable_tools: bool = True):
+    """Construct a pydantic-ai Agent for the given AI configuration.
+
+    enable_tools=False builds the same agent with zero tools registered, so no
+    `tools` array is ever sent to the provider — used for connection tests and
+    for the graceful-degradation retry when a gateway rejects tool schemas
+    (Azure OpenAI / LiteLLM: see GitHub #25).
+    """
     try:
         from pydantic_ai import Agent
         from pydantic_ai.models.openai import OpenAIModel
@@ -265,11 +297,19 @@ def build_agent(config: AIConfig):
 
     # ── Tools ──────────────────────────────────────────────────────────────
 
+    def _tool(*dargs, **dkwargs):
+        """Shim over agent.tool that no-ops registration when enable_tools=False."""
+        if not enable_tools:
+            if len(dargs) == 1 and callable(dargs[0]) and not dkwargs:
+                return dargs[0]  # bare @_tool — leave function unregistered
+            return lambda f: f  # @_tool(retries=3) — no-op decorator
+        return agent.tool(*dargs, **dkwargs)
+
     async def _emit(ctx, message: str) -> None:
         if ctx.deps.events_queue is not None:
             await ctx.deps.events_queue.put({"thinking": message})
 
-    @agent.tool
+    @_tool
     async def get_diagram_context(ctx) -> dict[str, Any]:
         """Get all elements and data flows in the current diagram."""
         await _emit(ctx, "Reading diagram structure…")
@@ -320,7 +360,7 @@ def build_agent(config: AIConfig):
             "data_flows": flows,
         }
 
-    @agent.tool
+    @_tool
     async def get_existing_diagram_analysis(ctx) -> dict[str, Any]:
         """Return all threats and mitigations ALREADY attached to this diagram's elements.
         Call this FIRST so you do not re-propose anything that already exists."""
@@ -405,7 +445,7 @@ def build_agent(config: AIConfig):
             },
         }
 
-    @agent.tool
+    @_tool
     async def get_knowledge_base_threats(ctx) -> list[dict[str, Any]]:
         """Load all threats from the knowledge base for the active framework.
         Call this once before proposing any threats."""
@@ -429,7 +469,7 @@ def build_agent(config: AIConfig):
         await cache.set(cache_key, threats, ttl=300)
         return threats
 
-    @agent.tool
+    @_tool
     async def get_knowledge_base_mitigations(ctx) -> list[dict[str, Any]]:
         """Load all mitigations from the knowledge base for the active framework.
         Call this once before proposing any mitigations."""
@@ -477,7 +517,7 @@ def build_agent(config: AIConfig):
                     return f"{node_map.get(src, src)} → {node_map.get(tgt, tgt)}"
         return element_id
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_threat(
         ctx,
         element_id: str,
@@ -555,7 +595,7 @@ def build_agent(config: AIConfig):
         })
         return f"Threat proposal '{threat.name if threat else threat_id}' registered as {proposal_id}"
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_mitigation(
         ctx,
         element_id: str,
@@ -629,7 +669,7 @@ def build_agent(config: AIConfig):
         })
         return f"Mitigation proposal '{mit.name if mit else mitigation_id}' registered as {proposal_id}"
 
-    @agent.tool
+    @_tool
     async def get_available_frameworks(ctx) -> list[dict[str, Any]]:
         """List all available threat modeling frameworks (e.g. STRIDE, OWASP, LINDDUN).
         Call this when model_id is None to choose a framework before proposing model creation."""
@@ -641,7 +681,7 @@ def build_agent(config: AIConfig):
             for f in frameworks
         ]
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_create_model(
         ctx,
         framework_name: str,
@@ -727,7 +767,7 @@ def build_agent(config: AIConfig):
             f"propose_mitigation call that belongs to this {framework.name} analysis."
         )
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_custom_threat(
         ctx,
         element_id: str,
@@ -786,7 +826,7 @@ def build_agent(config: AIConfig):
         })
         return f"Custom threat suggestion '{name}' registered as {proposal_id} (will add to KB on approval)"
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_custom_mitigation(
         ctx,
         element_id: str,
@@ -839,7 +879,7 @@ def build_agent(config: AIConfig):
         })
         return f"Custom mitigation suggestion '{name}' registered as {proposal_id} (will add to KB on approval)"
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_risk_update(
         ctx,
         diagram_threat_id: int,
@@ -901,7 +941,7 @@ def build_agent(config: AIConfig):
         })
         return f"Risk update proposal for '{threat_name}' registered as {proposal_id} (L={likelihood}, I={impact}, score={risk_score}, {severity})"
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_removal(
         ctx,
         item_type: str,
@@ -940,7 +980,7 @@ def build_agent(config: AIConfig):
         })
         return f"Removal proposal for {item_type} '{name}' registered as {proposal_id}"
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_threats_batch(ctx, items: list[_ThreatBatchItem]) -> str:
         """Propose multiple threats in ONE call — mandatory for efficiency.
         Use this instead of calling propose_threat in a loop.
@@ -1012,7 +1052,7 @@ def build_agent(config: AIConfig):
         await _emit(ctx, f"Registered {len(registered)} threat proposals ({skipped} skipped as duplicates)…")
         return f"Registered {len(registered)} threats, skipped {skipped} duplicates. IDs: {', '.join(registered)}"
 
-    @agent.tool(retries=3)
+    @_tool(retries=3)
     async def propose_mitigations_batch(ctx, items: list[_MitigationBatchItem]) -> str:
         """Propose multiple mitigations in ONE call — mandatory for efficiency.
         Use this instead of calling propose_mitigation in a loop.
@@ -1089,7 +1129,7 @@ def build_agent(config: AIConfig):
         await _emit(ctx, f"Registered {len(registered)} mitigation proposals ({skipped} skipped as duplicates)…")
         return f"Registered {len(registered)} mitigations, skipped {skipped} duplicates. IDs: {', '.join(registered)}"
 
-    @agent.tool
+    @_tool
     async def get_models_for_diagram(ctx) -> list[dict[str, Any]]:
         """Get all threat models for this diagram with their framework names.
         Call this BEFORE any analysis to verify you are saving to the correct model."""
@@ -1113,7 +1153,7 @@ def build_agent(config: AIConfig):
             })
         return result
 
-    @agent.tool
+    @_tool
     async def switch_model_context(ctx, model_id: CoercedInt) -> dict[str, Any]:
         """Switch the active model context so subsequent proposals target a different model.
         Call this when the requested framework does not match the currently active model.

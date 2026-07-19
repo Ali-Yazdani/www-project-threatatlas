@@ -60,6 +60,7 @@ cp .env.example .env
 - **`SECRET_KEY`**: Change this to a long random string for security.
 - **`POSTGRES_PASSWORD`**: Change the default before any shared or production deployment.
 - **`SMTP Settings`**: Required for email invitation links to work.
+- **`BACKEND_BASE_URL`**: Must be set to your backend's real public origin before enabling the [MCP server](mcp.md) — it's used as the OAuth issuer for AI assistant logins.
 
 ---
 
