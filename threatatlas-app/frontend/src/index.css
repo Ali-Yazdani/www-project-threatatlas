@@ -321,6 +321,20 @@
   }
 }
 
+/* Use app theme tokens for React Flow's zoom, fit-view, and lock buttons. */
+.react-flow__controls {
+  --xy-controls-button-background-color: var(--background);
+  --xy-controls-button-background-color-hover: var(--accent);
+  --xy-controls-button-color: var(--foreground);
+  --xy-controls-button-color-hover: var(--accent-foreground);
+  --xy-controls-button-border-color: var(--border);
+}
+
+.react-flow__controls-button:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: -2px;
+}
+
 @layer utilities {
   /* ============================================================
      Clay Color Utilities

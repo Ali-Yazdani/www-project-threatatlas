@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { toast } from 'sonner';
+import { useTheme } from 'next-themes';
 import {
   ReactFlow,
   MiniMap,
@@ -129,6 +130,7 @@ const edgeTypes = {
 
 export function DiagramsContent() {
   const { canWrite } = useAuth();
+  const { resolvedTheme } = useTheme();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const productId = searchParams.get('product');
@@ -1615,13 +1617,21 @@ export function DiagramsContent() {
             }}
             elevateNodesOnSelect={false}
             fitView
+            minZoom={0.1}
+            colorMode={resolvedTheme === 'dark' ? 'dark' : 'light'}
             className="bg-background"
             proOptions={{ hideAttribution: true }}
           >
             {/* Live collaboration cursors */}
             <CollabCursors cursors={collabCursors} />
 
-            {showZoomControls && <Controls className="bg-background border shadow-xl rounded-lg overflow-hidden" />}
+            {showZoomControls && (
+              <Controls
+                showZoom
+                showFitView
+                className="bg-background border shadow-xl rounded-lg overflow-hidden"
+              />
+            )}
             {showMiniMap && (
               <MiniMap
                 className="bg-background border shadow-xl rounded-xl"
