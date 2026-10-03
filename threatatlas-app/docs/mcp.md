@@ -119,6 +119,7 @@ same routers, RBAC, and audit logging as the REST API and web UI.
 | Tool | Description |
 |---|---|
 | `list_frameworks()` | List threat-modeling frameworks (e.g. STRIDE, LINDDUN) |
+| `create_custom_framework(name, description?)` | Create a custom threat-modeling framework |
 | `list_diagram_models(diagram_id)` | List the framework instances ("models") attached to a diagram |
 | `create_diagram_model(diagram_id, framework_id, name, description?)` | Bind a diagram to a framework — required before identifying threats/mitigations |
 
@@ -149,6 +150,7 @@ same routers, RBAC, and audit logging as the REST API and web UI.
 | Tool | Description |
 |---|---|
 | `list_component_templates(framework_id?)` | List canonical DFD element templates (process, external entity, data store, ...), each pre-linked to KB threats/mitigations |
+| `create_component_template(name, slug, category, node_type, icon?, description?, threat_ids?, mitigation_ids?)` | Create a custom component template, optionally linked to knowledge-base threats and mitigations. Requires an administrator token. |
 | `apply_component_template(template_id, diagram_id, model_id, element_id, element_type?, threat_ids?, mitigation_ids?)` | Attach a template's threats and mitigations to one diagram element in a single atomic, idempotent call — the fastest way to draw an element and identify+mitigate its threats at once |
 
 ### Risk

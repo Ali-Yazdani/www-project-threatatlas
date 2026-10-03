@@ -38,6 +38,7 @@ def call_tool(client: TestClient, headers: dict, name: str, arguments: dict | No
 def tool_value(result: dict):
     """FastMCP puts list-returning tools under structuredContent.result; a
     bare `dict` return type only produces a JSON-text content block."""
+    assert not result.get("isError"), result
     if "structuredContent" in result:
         return result["structuredContent"]["result"]
     return json.loads(result["content"][0]["text"])
@@ -153,6 +154,7 @@ def test_valid_token_lists_all_tools(client: TestClient, admin_headers: dict):
         "list_diagram_mitigations",
         "search_threatatlas",
         "list_frameworks",
+        "create_custom_framework",
         "list_diagram_models",
         "create_diagram_model",
         "list_knowledge_base_mitigations",
@@ -166,6 +168,7 @@ def test_valid_token_lists_all_tools(client: TestClient, admin_headers: dict):
         "create_custom_mitigation",
         "remove_mitigation_from_diagram",
         "list_component_templates",
+        "create_component_template",
         "apply_component_template",
         "get_product_security_status",
     }
@@ -657,6 +660,26 @@ def test_list_frameworks(client: TestClient, standard_user: User, user_headers: 
     assert "STRIDE" in names
 
 
+def test_create_custom_framework(client: TestClient, standard_user: User, user_headers: dict):
+    result = call_tool(client, user_headers, "create_custom_framework", {
+        "name": "Custom Security Model",
+        "description": "Created through MCP",
+    })
+    created = tool_value(result)
+    assert created["name"] == "Custom Security Model"
+    assert created["description"] == "Created through MCP"
+    assert created["is_custom"] is True
+    assert created["user_id"] == standard_user.id
+
+
+def test_create_custom_framework_rejected_for_read_only(client: TestClient, db: Session):
+    read_only_user = _create_user(db, "readonly-framework@test.com", role=UserRole.READ_ONLY.value)
+    result = call_tool(client, make_auth_headers(read_only_user), "create_custom_framework", {
+        "name": "Read-only Framework",
+    })
+    assert "403" in tool_error_text(result)
+
+
 def test_create_diagram_model(client: TestClient, standard_user: User, user_headers: dict, db: Session):
     product = _create_product(db, standard_user)
     diagram = _create_diagram(db, product)
@@ -788,6 +811,52 @@ def test_list_component_templates(client: TestClient, standard_user: User, user_
     groups = tool_value(result)
     all_names = [t["name"] for group in groups for t in group["components"]]
     assert "Redis Cache" in all_names
+
+
+def test_create_component_template(client: TestClient, admin_headers: dict, db: Session):
+    framework = _create_framework(db)
+    threat = _create_threat(db, framework, "Cache poisoning")
+    mitigation = _create_mitigation(db, framework, "Validate cache keys")
+    threat.category = "Tampering"
+    mitigation.category = "Input validation"
+    db.flush()
+
+    result = call_tool(client, admin_headers, "create_component_template", {
+        "name": "Session Cache",
+        "slug": "session-cache",
+        "category": "Databases",
+        "node_type": "datastore",
+        "description": "Stores user session data.",
+        "threat_ids": [threat.id],
+        "mitigation_ids": [mitigation.id],
+    })
+
+    created = tool_value(result)
+    assert created["name"] == "Session Cache"
+    assert created["is_custom"] is True
+    assert [item["id"] for item in created["threats"]] == [threat.id]
+    assert [item["id"] for item in created["mitigations"]] == [mitigation.id]
+    assert created["threats"][0]["category"] == "Tampering"
+    assert created["mitigations"][0]["category"] == "Input validation"
+
+    # The REST detail endpoint uses the same linked-item response schemas.
+    response = client.get(f"/api/component-templates/{created['id']}", headers=admin_headers)
+    assert response.status_code == 200, response.text
+    detail = response.json()
+    assert detail["threats"] == created["threats"]
+    assert detail["mitigations"] == created["mitigations"]
+
+
+def test_create_component_template_rejected_for_non_admin(
+    client: TestClient, standard_user: User, user_headers: dict,
+):
+    result = call_tool(client, user_headers, "create_component_template", {
+        "name": "Unauthorized Component",
+        "slug": "unauthorized-component",
+        "category": "Databases",
+        "node_type": "datastore",
+    })
+    assert "403" in tool_error_text(result)
 
 
 def test_apply_component_template(client: TestClient, standard_user: User, user_headers: dict, db: Session):
